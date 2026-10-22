@@ -1,0 +1,103 @@
+﻿#######################################################################################
+#  CORREÇÃO - erro "Não consegui trazer o programa para a frente." (SGCI filtrando OR)
+#
+#  O QUE ACONTECIA
+#  Depois do clique em "Filtrar" na janela "Selecione", o SGCI abre por um instante uma
+#  janelinha de aviso/aguarde (classe #32770) que fecha sozinha quando a grade termina
+#  de carregar. O SGCI-ChecarPopup achava essa janela, tentava clicar no OK dela, mas
+#  ela já tinha sumido: o Clicar via que o botão não estava mais embaixo do mouse,
+#  chamava Ativar(...'programa') numa janela que não existia mais e dava o erro.
+#  (No print a grade já mostra a OR 26100027200 certinha, ou seja, o filtro funcionou.)
+#
+#  O QUE MUDOU
+#  1. Popups        - ignora janelas que já fecharam ou que são minúsculas/invisíveis.
+#  2. SGCI-ChecarPopup - espera 0,6 s e só trata o popup se ele CONTINUAR aberto
+#                        (popup rápido que some sozinho deixa de derrubar a automação).
+#  3. Texto-Popup / Responder-Popup - se o popup fechar no meio, apenas seguem em frente;
+#                        se o Windows não deixar trazer o popup para a frente, aperta o
+#                        botão por mensagem (BM_CLICK), que não depende de foco.
+#  4. Ativar        - se a janela já fechou, dá uma mensagem clara; se o Windows bloquear a
+#                     troca de foco, faz a troca rápida de área de trabalho (mesmo truque
+#                     do Destravar-Foco / Ctrl+Alt+Del + Esc) e tenta mais uma vez.
+#
+#  COMO APLICAR (no arquivo .ps1 original, no PC)
+#  Abra o .ps1 no Bloco de Notas, localize cada função abaixo pelo nome
+#  ("function Ativar", "function Popups", "function Texto-Popup", "function Responder-Popup",
+#  "function SGCI-ChecarPopup") e substitua a função INTEIRA (da linha "function ..."
+#  até a "}" final dela) pela versão abaixo. Salve como UTF-8 com BOM (igual ao original).
+#  Se você usa o automacao_sem_impressao.ps1, ele é gerado a partir deste arquivo.
+#######################################################################################
+
+
+# ======================= substitui a function Ativar (seção "janelas / controles") =====
+function Ativar([IntPtr]$h, [string]$nome) {
+  for ($i = 0; $i -lt 4; $i++) {
+    if (-not [U]::IsWindow($h)) { Fail "A janela do $nome fechou antes de vir para a frente." }
+    if ([U]::Activate($h)) { Pausa 200; return }
+    Pausa 400
+  }
+  # o Windows as vezes bloqueia a troca de foco: troca rapido de area de trabalho e volta (igual ao Destravar-Foco)
+  if ([U]::IsWindow($h)) {
+    $r = [U]::PiscarDesktop(250)
+    if ($r -ne 'ok') { Log "   (troca de tela: $r)" }
+    Pausa 500
+    if ([U]::Activate($h)) { Pausa 200; return }
+  }
+  if (-not [U]::IsWindow($h)) { Fail "A janela do $nome fechou antes de vir para a frente." }
+  Fail "Não consegui trazer o $nome para a frente."
+}
+
+
+# ======================= substitui a function Popups (seção "popups") =================
+function Popups([int]$procId, [IntPtr[]]$ignorar) {
+  # so popups que ainda existem e tem tamanho de verdade (janelas-fantasma / ja fechadas ficam de fora)
+  @([U]::Tops([uint32]$procId) | Where-Object { ($_.Cls -eq '#32770' -or $_.Cls -eq 'TMessageForm') -and ($ignorar -notcontains $_.H) -and $_.W -gt 40 -and $_.Hg -gt 40 -and [U]::IsWindow($_.H) })
+}
+
+
+# ======================= substitui a function Texto-Popup =============================
+function Texto-Popup([WinInfo]$p) {
+  if (-not [U]::IsWindow($p.H)) { return '' }
+  $t = (Filhos $p.H | Where-Object { $_.Cls -eq 'Static' -and $_.Text } | ForEach-Object { $_.Text }) -join ' '
+  if (-not $t -and [U]::IsWindow($p.H)) {
+    try { Ativar $p.H 'popup'; $t = (Get-Ocr $p.H 2 -Tela).Text -replace "`n", ' ' } catch { if ([U]::IsWindow($p.H)) { throw }; $t = '' }
+  }
+  return ([string]$t).Trim()
+}
+
+
+# ======================= substitui a function Responder-Popup =========================
+function Responder-Popup([WinInfo]$p, [string[]]$botoes) {
+  # popup que fechou sozinho (ex aviso rapido enquanto o SGCI filtra) - nada a responder
+  if (-not [U]::IsWindow($p.H) -or -not [U]::IsWindowVisible($p.H)) { return }
+  foreach ($b in $botoes) {
+    $btn = Filhos $p.H | Where-Object { $_.Vis -and (Norm $_.Text) -eq (Norm $b) } | Select-Object -First 1
+    if ($btn) {
+      try { Ativar $p.H 'popup'; Clicar $btn }
+      catch {
+        if ($_.Exception.Message -like '*ESC*') { throw }
+        if (-not [U]::IsWindow($p.H)) { return }
+        # nao conseguiu trazer o popup para a frente / algo cobrindo: aperta o botao por mensagem (nao depende de foco)
+        if ([U]::IsWindow($btn.H)) { [void][U]::PostMessage($btn.H, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero); Pausa 400 } else { throw }
+      }
+      return
+    }
+  }
+  if (-not [U]::IsWindow($p.H)) { return }
+  Ativar $p.H 'popup'; [Windows.Forms.SendKeys]::SendWait('{ENTER}'); Pausa 300
+}
+
+
+# ======================= substitui a function SGCI-ChecarPopup (seção SGCI) ===========
+function SGCI-ChecarPopup([string]$contexto) {
+  $ps = @(Popups $script:sgciPid)
+  if ($ps.Count -eq 0) { return }
+  # o SGCI mostra avisos rapidos (ex enquanto filtra a OR) que fecham sozinhos - so trata se continuar aberto
+  Pausa 600
+  $p = $ps | Where-Object { [U]::IsWindow($_.H) -and [U]::IsWindowVisible($_.H) } | Select-Object -First 1
+  if (-not $p) { return }
+  $t = Texto-Popup $p
+  if (-not [U]::IsWindow($p.H)) { return }
+  Responder-Popup $p @('OK')
+  Fail "SGCI mostrou a mensagem ($contexto): $t"
+}
