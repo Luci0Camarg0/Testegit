@@ -43,7 +43,21 @@ pyinstaller --noconfirm --clean --onefile --windowed ^
     --add-data "assets;assets" ^
     --icon "assets\icone.ico" ^
     --collect-all rapidocr_onnxruntime ^
-    reconhecimento.py || goto :erro
+    --hidden-import csv ^
+    --hidden-import zipfile ^
+    --hidden-import hashlib ^
+    --hidden-import datetime ^
+    --hidden-import statistics ^
+    --hidden-import concurrent.futures ^
+    --hidden-import webbrowser ^
+    --hidden-import tkinter.simpledialog ^
+    --hidden-import tkinter.colorchooser ^
+    --hidden-import PIL.ImageOps ^
+    --hidden-import PIL.ImageDraw ^
+    --hidden-import PIL.ImageFilter ^
+    --hidden-import PIL.ImageFont ^
+    --hidden-import PIL.ExifTags ^
+    iniciar.py || goto :erro
 
 echo.
 echo ==============================================

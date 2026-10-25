@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -26,8 +29,17 @@ jobs:
           Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx -OutFile models/face_detection_yunet_2023mar.onnx
           Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx -OutFile models/face_recognition_sface_2021dec.onnx
 
+      - name: Conferir numero da versao
+        shell: pwsh
+        run: |
+          $j = Get-Content versao.json -Raw | ConvertFrom-Json
+          $m = Select-String -Path reconhecimento.py -Pattern '^VERSAO\s*=\s*(\d+)'
+          $v = [int]$m.Matches[0].Groups[1].Value
+          Write-Output "versao.json=$($j.versao) reconhecimento.py=$v"
+          if ($j.versao -ne $v) { Write-Error "versao.json e VERSAO diferentes"; exit 1 }
+
       - name: Gerar exe
-        run: pyinstaller --noconfirm --onefile --windowed --name ReconhecimentoFacial --add-data "models;models" --add-data "assets;assets" --icon assets/icone.ico --collect-all rapidocr_onnxruntime reconhecimento.py
+        run: pyinstaller --noconfirm --onefile --windowed --name ReconhecimentoFacial --add-data "models;models" --add-data "assets;assets" --icon assets/icone.ico --collect-all rapidocr_onnxruntime --hidden-import csv --hidden-import zipfile --hidden-import hashlib --hidden-import datetime --hidden-import statistics --hidden-import concurrent.futures --hidden-import webbrowser --hidden-import tkinter.simpledialog --hidden-import tkinter.colorchooser --hidden-import PIL.ImageOps --hidden-import PIL.ImageDraw --hidden-import PIL.ImageFilter --hidden-import PIL.ImageFont --hidden-import PIL.ExifTags iniciar.py
 
       - name: Testar o exe (modelos de rosto e leitor de fichas)
         shell: pwsh
@@ -42,3 +54,13 @@ jobs:
         with:
           name: ReconhecimentoFacial
           path: dist/ReconhecimentoFacial.exe
+
+      - name: Publicar link fixo de download (release "ultima")
+        if: github.ref == 'refs/heads/reconhecimento-facial'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ultima -y --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create ultima dist/ReconhecimentoFacial.exe --target $env:GITHUB_SHA --title "Reconhecimento Facial (ultima versao)" --notes "Baixe o ReconhecimentoFacial.exe abaixo. Depois de instalado, o programa se atualiza sozinho."

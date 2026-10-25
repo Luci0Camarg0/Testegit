@@ -26,6 +26,16 @@ import numpy as np
 import cv2
 
 APP_NAME = "Reconhecimento Facial"
+
+# Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
+# versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
+# baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
+VERSAO = 6
+RUNTIME_NEEDED = 1
+UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
+    "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
+FULL_DOWNLOAD = ("https://github.com/Luci0Camarg0/Testegit/releases/download/"
+                 "ultima/ReconhecimentoFacial.exe")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 DETECTOR_FILE = "face_detection_yunet_2023mar.onnx"
@@ -55,6 +65,8 @@ MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pe
 
 def app_dir():
     """Pasta onde esta o .exe (ou o .py)."""
+    if os.environ.get("RF_APP_DIR"):        # definido pelo iniciar.py
+        return os.environ["RF_APP_DIR"]
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -621,6 +633,65 @@ def process_folder(src, engine, log=print, progress=lambda done, total: None,
 
 
 # ---------------------------------------------------------------------------
+# Atualizacao automatica
+# ---------------------------------------------------------------------------
+
+def _get(url, timeout=8):
+    req = urllib.request.Request(url, headers={"Cache-Control": "no-cache",
+                                               "User-Agent": "ReconhecimentoFacial"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def check_update():
+    """
+    Ve se existe versao nova. Retorna None, ("codigo", versao) quando o codigo
+    novo ja foi baixado (vale na proxima vez que abrir) ou ("completa", versao)
+    quando a mudanca precisa do .exe novo.
+    """
+    runtime = int(os.environ.get("RF_RUNTIME", "0"))
+    if not runtime:             # rodando direto do .py, sem o .exe
+        return None
+    info = json.loads(_get(UPDATE_BASE + "versao.json").decode("utf-8"))
+    remote = int(info["versao"])
+    if remote <= VERSAO:
+        return None
+    if int(info.get("runtime", 1)) > runtime:
+        return ("completa", remote)
+    dest_dir = os.path.join(os.path.dirname(data_dir()), "atualizacao")
+    dest = os.path.join(dest_dir, "reconhecimento.py")
+    try:
+        with open(dest, encoding="utf-8") as f:
+            m = re.search(r"^VERSAO\s*=\s*(\d+)", f.read(), re.M)
+        if m and int(m.group(1)) >= remote:
+            return ("codigo", remote)        # ja baixado, falta reabrir
+    except OSError:
+        pass
+    try:
+        with open(dest + ".com_erro", encoding="utf-8") as f:
+            m = re.search(r"^VERSAO\s*=\s*(\d+)", f.read(), re.M)
+        if m and int(m.group(1)) >= remote:
+            return None                      # essa versao ja deu erro aqui
+    except OSError:
+        pass
+    code = _get(UPDATE_BASE + "reconhecimento.py", timeout=30).decode("utf-8")
+    m = re.search(r"^VERSAO\s*=\s*(\d+)", code, re.M)
+    if not m or int(m.group(1)) != remote:
+        return None                          # arquivo ainda nao atualizado no servidor
+    compile(code, "reconhecimento.py", "exec")   # nao salva codigo quebrado
+    os.makedirs(dest_dir, exist_ok=True)
+    with open(dest + ".tmp", "w", encoding="utf-8") as f:
+        f.write(code)
+    os.replace(dest + ".tmp", dest)
+    return ("codigo", remote)
+
+
+def restart_program():
+    subprocess.Popen([sys.executable] + ([] if getattr(sys, "frozen", False)
+                                         else [os.path.abspath(sys.argv[0])]))
+
+
+# ---------------------------------------------------------------------------
 # Interface
 # ---------------------------------------------------------------------------
 
@@ -696,7 +767,7 @@ def run_gui():
     msgs = queue.Queue()
 
     win = tk.Tk()
-    win.title(APP_NAME)
+    win.title("%s  —  versão %d" % (APP_NAME, VERSAO))
     win.geometry("820x600")
     win.minsize(560, 420)
     win.configure(bg=BG)
@@ -779,8 +850,12 @@ def run_gui():
     prog.pack(fill="x")
     status_var = tk.StringVar(value="Pronto. Clique em 'Adicionar pasta de fotos'.  "
                                     "Botão direito numa pasta para renomear.")
-    tk.Label(bottom, textvariable=status_var, bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
-             anchor="w").pack(fill="x", pady=(6, 0))
+    status_row = tk.Frame(bottom, bg=BG)
+    status_row.pack(fill="x", pady=(6, 0))
+    tk.Label(status_row, textvariable=status_var, bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
+             anchor="w").pack(side="left")
+    update_lbl = tk.Label(status_row, text="", bg=BG, fg=ACCENT_HOVER,
+                          font=("Segoe UI", 10, "bold underline"), cursor="hand2")
 
     # --- logo ---------------------------------------------------------------
     logo_src = None
@@ -1247,6 +1322,37 @@ def run_gui():
         save_settings(cfg)
         show_roster()
 
+    # --- atualizacao ---------------------------------------------------------
+    def update_job():
+        try:
+            msgs.put(("update", check_update()))
+        except Exception:
+            pass                    # sem internet: tenta de novo na proxima vez
+
+    def show_update(res):
+        if not res:
+            return
+        kind, ver = res
+        if kind == "codigo":
+            update_lbl.configure(text="Versão %d pronta. Clique para reiniciar e usar." % ver)
+
+            def go(_e=None):
+                if state["busy"]:
+                    messagebox.showinfo(APP_NAME, "Espere terminar o processamento.",
+                                        parent=win)
+                    return
+                restart_program()
+                win.destroy()
+        else:
+            update_lbl.configure(text="Versão %d disponível: clique para baixar o "
+                                      "programa novo." % ver)
+
+            def go(_e=None):
+                import webbrowser
+                webbrowser.open(FULL_DOWNLOAD)
+        update_lbl.bind("<Button-1>", go)
+        update_lbl.pack(side="right")
+
     # --- processamento ------------------------------------------------------
     def worker(folder):
         def log(m):
@@ -1282,6 +1388,8 @@ def run_gui():
                     prog["maximum"] = m[2]
                     prog["value"] = m[1]
                     status_var.set("Analisando fotos... %d de %d" % (m[1], m[2]))
+                elif m[0] == "update":
+                    show_update(m[1])
                 elif m[0] == "cards":
                     busy(False)
                     status_var.set("Fichas lidas. Confira os nomes.")
@@ -1337,6 +1445,7 @@ def run_gui():
 
     refresh()
     poll()
+    threading.Thread(target=update_job, daemon=True).start()
     search.focus_set()
     win.mainloop()
 
@@ -1358,17 +1467,21 @@ def self_test():
         cv2.putText(img, "MARIA 4821", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
         name, code, lines = read_card(img)
         assert engine.detect(img).shape[1] == 15
-        msg = "ok %s %s" % (name, code)
+        msg = "ok v%d %s %s" % (VERSAO, name, code)
     except Exception as e:
         msg = "erro %r" % e
     with open(out, "w", encoding="utf-8") as f:
         f.write(msg)
 
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--autoteste":
+def main(argv):
+    if argv and argv[0] == "--autoteste":
         self_test()
-    elif len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
-        run_cli(sys.argv[1])
+    elif argv and os.path.isdir(argv[0]):
+        run_cli(argv[0])
     else:
         run_gui()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

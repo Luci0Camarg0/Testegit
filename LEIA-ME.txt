@@ -37,6 +37,23 @@ Opção 2 - Pasta com fotos já nomeadas:
 - No fim ele avisa quais alunos não apareceram em nenhuma foto.
 - Clique em "remover cadastro" para voltar ao modo automático (aluno_1, aluno_2...).
 
+ATUALIZAÇÃO AUTOMÁTICA
+- Ao abrir, o programa confere na internet se há versão nova. Se houver, baixa
+  só o código (uns 80 KB) e mostra embaixo: "Versão N pronta. Clique para
+  reiniciar e usar." O .exe não precisa ser baixado de novo.
+- O código novo fica na pasta "atualizacao", ao lado da pasta "Eventos".
+  Apagar essa pasta volta para a versão que veio dentro do .exe.
+- Se uma versão nova der erro ao abrir, o programa volta sozinho para a versão
+  do .exe e não tenta mais aquela versão.
+- Só quando mudar o "motor" (bibliotecas ou modelos de IA) ele avisa que é
+  preciso baixar o .exe completo, e o clique abre o link direto:
+  https://github.com/Luci0Camarg0/Testegit/releases/download/ultima/ReconhecimentoFacial.exe
+- Sem internet o programa funciona normal, só não se atualiza.
+- Para quem mexe no código: a cada mudança em reconhecimento.py, aumente
+  VERSAO nele e "versao" em versao.json (os dois iguais). Se a mudança precisar
+  de biblioteca nova, aumente RUNTIME em iniciar.py, RUNTIME_NEEDED em
+  reconhecimento.py e "runtime" em versao.json, e baixe o .exe novo.
+
 COMO GERAR O .EXE (uma vez só)
 Opção A - no seu computador Windows:
   1. Instale o Python 3.12: https://www.python.org/downloads/
@@ -49,10 +66,12 @@ Opção B - pelo GitHub (sem instalar nada):
   1. Crie um repositório no GitHub e envie todos estes arquivos
      (incluindo a pasta .github).
   2. Abra a aba "Actions"; o processo "Gerar exe para Windows" roda sozinho.
-  3. Ao terminar, baixe o "ReconhecimentoFacial" em "Artifacts".
+  3. Ao terminar, baixe o "ReconhecimentoFacial" em "Artifacts" (ou, no branch
+     reconhecimento-facial, pelo link fixo da release "ultima").
 
 OBSERVAÇÕES
-- Funciona sem internet (os modelos de IA vão dentro do .exe).
+- Funciona sem internet (os modelos de IA vão dentro do .exe); a internet só é
+  usada para procurar atualizações.
 - Rostos muito pequenos, de costas ou muito borrados são ignorados.
 - O Windows pode mostrar "O Windows protegeu o computador" na primeira vez,
   porque o .exe não é assinado. Clique em "Mais informações" > "Executar assim mesmo".
