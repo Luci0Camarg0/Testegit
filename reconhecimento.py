@@ -442,6 +442,120 @@ def match_roster(embs, photo_ids, groups, roster):
 
 
 # ---------------------------------------------------------------------------
+# Fichas de identificacao (foto do aluno segurando a ficha com nome e codigo)
+# ---------------------------------------------------------------------------
+
+CARD_LABELS = {"nome", "aluno", "aluna", "codigo", "código", "cod", "cód", "id",
+               "curso", "turma", "matricula", "matrícula", "n", "no", "nº", "numero", "número"}
+
+CARD_SKIP = {"formatura", "formandos", "colegio", "colégio", "escola", "turma", "curso",
+             "universidade", "faculdade", "gala", "eventos", "ficha", "identificacao",
+             "identificação"}
+
+_ocr = None
+
+
+def get_ocr():
+    global _ocr
+    if _ocr is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr = RapidOCR()
+    return _ocr
+
+
+def parse_card(lines):
+    """
+    Separa nome e codigo do texto lido na ficha.
+    Codigo: a maior sequencia de numeros (3 ou mais digitos).
+    Nome: a linha mais longa feita de letras, sem rotulos como "Nome:".
+    """
+    code, name, best_c = "", "", -99
+    for t in lines:
+        low = t.lower()
+        labeled = any(l in low for l in ("cod", "cód", "id", "matr", "nº", "num", "núm"))
+        for d in re.findall(r"\d[\d\-./]*\d", t.replace(" ", "")):
+            if sum(c.isdigit() for c in d) < 3:
+                continue
+            score = len(d) + (10 if labeled else 0)
+            if re.fullmatch(r"(19|20)\d\d", d):     # parece ano (formatura 2026)
+                score -= 8
+            if score > best_c and score > 0:
+                best_c, code = score, d.replace("/", "-")
+    best = 0
+    for t in lines:
+        words = re.findall(r"[^\W\d_]+", t)
+        if any(w.lower() in CARD_SKIP for w in words):   # cabecalho da ficha
+            continue
+        words = [w for w in words if w.lower() not in CARD_LABELS]
+        letters = sum(len(w) for w in words)
+        digits = sum(c.isdigit() for c in t)
+        if len(words) == 0 or digits > letters:
+            continue
+        score = letters + 5 * (len(words) >= 2)
+        if score > best:
+            best, name = score, " ".join(words)
+    return name.strip().lower(), code
+
+
+def folder_name_for(name, code):
+    base = re.sub(r"[%s]" % re.escape(INVALID_CHARS), "", name).strip() or "sem_nome"
+    return "%s_%s" % (base, code) if code else base
+
+
+def read_card(img):
+    """Le o texto da foto da ficha. Retorna (nome, codigo, linhas lidas)."""
+    h, w = img.shape[:2]
+    k = min(1.0, 1600.0 / max(h, w))
+    small = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else img
+    res, _ = get_ocr()(small)
+    lines = [r[1] for r in (res or []) if r[2] >= 0.5]
+    name, code = parse_card(lines)
+    return name, code, lines
+
+
+def scan_cards(card_dir, engine, log=print, progress=lambda done, total: None):
+    """
+    Para cada foto de ficha: le nome e codigo e guarda o rosto do aluno.
+    Retorna lista de dicts {arquivo, nome, codigo, rosto (miniatura BGR) ou None}.
+    """
+    items = []
+    files = list_images(card_dir)
+    for i, path in enumerate(files):
+        item = {"file": path, "name": "", "code": "", "thumb": None, "lines": []}
+        img = read_image(path)
+        if img is not None:
+            faces = [f for f in engine.detect(img) if f[14] >= SURE_FACE]
+            if faces:
+                f = max(faces, key=lambda f: f[2] * f[3])
+                item["thumb"] = engine.recognizer.alignCrop(img, f)
+            try:
+                item["name"], item["code"], item["lines"] = read_card(img)
+            except Exception as e:  # sem OCR o usuario ainda pode digitar
+                log("Não consegui ler a ficha de %s: %s" % (os.path.basename(path), e))
+        log("%s: %s" % (os.path.basename(path),
+                        folder_name_for(item["name"], item["code"]) if item["name"] or
+                        item["code"] else "nome não lido"))
+        items.append(item)
+        progress(i + 1, len(files))
+    return items
+
+
+def save_roster_from_cards(items, roster_dir):
+    """Cria a pasta de cadastro: uma copia de cada foto de ficha com o nome do aluno."""
+    os.makedirs(roster_dir, exist_ok=True)
+    used = {}
+    for it in items:
+        base = it["folder"]
+        sub = os.path.join(roster_dir, base)
+        os.makedirs(sub, exist_ok=True)       # subpasta: o mesmo aluno pode ter varias fichas
+        n = used.get(base, 0) + 1
+        used[base] = n
+        ext = os.path.splitext(it["file"])[1]
+        shutil.copy2(it["file"], os.path.join(sub, "ficha_%d%s" % (n, ext)))
+    return roster_dir
+
+
+# ---------------------------------------------------------------------------
 # Processamento
 # ---------------------------------------------------------------------------
 
@@ -960,6 +1074,152 @@ def run_gui():
                            "aluno_1, aluno_2...")
             roster_clear.pack_forget()
 
+    def roster_menu():
+        if state["busy"]:
+            return
+        m = tk.Menu(win, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT,
+                    activeforeground=FG, bd=0, font=font)
+        m.add_command(label="Fotos das fichas (lê nome e código da ficha)",
+                      command=import_cards)
+        m.add_command(label="Pasta com uma foto de cada aluno, já com o nome",
+                      command=choose_roster)
+        x, y = roster_btn.winfo_rootx(), roster_btn.winfo_rooty() + roster_btn.winfo_height()
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
+
+    def busy(on):
+        state["busy"] = on
+        for b in (add_btn, roster_btn):
+            b.configure(state="disabled" if on else "normal")
+        if on:
+            prog["value"] = 0
+
+    def import_cards():
+        d = filedialog.askdirectory(title="Pasta com as fotos dos alunos segurando a ficha")
+        if not d:
+            return
+        if not list_images(d):
+            messagebox.showerror(APP_NAME, "Essa pasta não tem fotos.", parent=win)
+            return
+        busy(True)
+
+        def job():
+            def log(m):
+                msgs.put(("status", m))
+            try:
+                if state["engine"] is None:
+                    log("Carregando modelos de reconhecimento...")
+                    state["engine"] = FaceEngine(log)
+                log("Carregando leitor de texto...")
+                get_ocr()
+                items = scan_cards(d, state["engine"], log,
+                                   lambda a, t: msgs.put(("prog", a, t)))
+                msgs.put(("cards", d, items))
+            except Exception as e:
+                msgs.put(("error", str(e)))
+        threading.Thread(target=job, daemon=True).start()
+
+    def review_cards(card_dir, items):
+        """Janela para conferir/corrigir o nome lido de cada ficha antes de salvar."""
+        top = tk.Toplevel(win, bg=BG)
+        top.title("Conferir fichas")
+        top.geometry("760x620")
+        top.transient(win)
+        top.grab_set()
+        tk.Label(top, text="Confira o nome de cada aluno. Clique no nome para corrigir.",
+                 bg=BG, fg=FG, font=font_b, padx=12, pady=10, anchor="w").pack(fill="x")
+        tk.Label(top, text="Formato: nome_codigo  (ex.: maria eduarda_4821). Desmarque as "
+                 "fotos que não devem entrar.", bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
+                 padx=12, anchor="w").pack(fill="x")
+        body = tk.Frame(top, bg=BG)
+        body.pack(fill="both", expand=True, padx=12, pady=8)
+        cv = tk.Canvas(body, bg=BG, highlightthickness=0)
+        sc = ttk.Scrollbar(body, orient="vertical", command=cv.yview,
+                           style="Dark.Vertical.TScrollbar")
+        inner = tk.Frame(cv, bg=BG)
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.create_window(0, 0, window=inner, anchor="nw", tags="inner")
+        cv.bind("<Configure>", lambda e: cv.itemconfigure("inner", width=e.width))
+        cv.configure(yscrollcommand=sc.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sc.pack(side="right", fill="y")
+        cv.bind_all("<MouseWheel>", lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
+
+        rows, thumbs = [], []
+        top.thumbs = thumbs     # mantem as miniaturas vivas enquanto a janela existir
+        for it in items:
+            r = tk.Frame(inner, bg=PANEL, padx=8, pady=6)
+            r.pack(fill="x", pady=3)
+            var_on = tk.BooleanVar(value=it["thumb"] is not None)
+            tk.Checkbutton(r, variable=var_on, bg=PANEL, activebackground=PANEL,
+                           selectcolor=BG, fg=FG).pack(side="left")
+            if it["thumb"] is not None:
+                rgb = cv2.cvtColor(cv2.resize(it["thumb"], (64, 64)), cv2.COLOR_BGR2RGB)
+                ph = ImageTk.PhotoImage(Image.fromarray(rgb))
+                thumbs.append(ph)
+                tk.Label(r, image=ph, bg=PANEL).pack(side="left", padx=(0, 10))
+            else:
+                tk.Label(r, text="sem\nrosto", width=8, height=3, bg="#3a1414", fg=FG,
+                         font=("Segoe UI", 9)).pack(side="left", padx=(0, 10))
+            col = tk.Frame(r, bg=PANEL)
+            col.pack(side="left", fill="x", expand=True)
+            var_name = tk.StringVar(value=folder_name_for(it["name"], it["code"])
+                                    if it["name"] or it["code"] else "")
+            e = tk.Entry(col, textvariable=var_name, font=font, bg="#2b2b2b", fg=FG,
+                         insertbackground=FG, relief="flat", highlightthickness=1,
+                         highlightbackground=ACCENT if not var_name.get() else "#333333",
+                         highlightcolor=ACCENT)
+            e.pack(fill="x", ipady=4)
+            info = os.path.basename(it["file"])
+            if it["lines"]:
+                info += "   •   lido: " + " | ".join(it["lines"])[:90]
+            tk.Label(col, text=info, bg=PANEL, fg=FG_DIM, font=("Segoe UI", 9),
+                     anchor="w").pack(fill="x")
+            rows.append((it, var_on, var_name))
+
+        bar2 = tk.Frame(top, bg=BG, padx=12, pady=10)
+        bar2.pack(fill="x")
+
+        def save():
+            chosen = []
+            for it, on, nm in rows:
+                if not on.get():
+                    continue
+                name = nm.get().strip()
+                err = None if name else "Falta o nome de %s." % os.path.basename(it["file"])
+                if name and (any(c in name for c in INVALID_CHARS) or name.endswith(".")):
+                    err = "O nome \"%s\" tem caracteres que o Windows não aceita." % name
+                if err:
+                    messagebox.showerror(APP_NAME, err, parent=top)
+                    return
+                it["folder"] = name
+                chosen.append(it)
+            if not chosen:
+                messagebox.showerror(APP_NAME, "Nenhuma ficha marcada.", parent=top)
+                return
+            base = os.path.join(os.path.dirname(root_dir), "Cadastros")
+            dest = os.path.join(base, next_numbered_name(base, "cadastro"))
+            try:
+                save_roster_from_cards(chosen, dest)
+            except OSError as ex:
+                messagebox.showerror(APP_NAME, "Não foi possível salvar: %s" % ex, parent=top)
+                return
+            cfg["roster_dir"] = dest
+            save_settings(cfg)
+            show_roster()
+            status_var.set("Cadastro salvo com %d aluno(s)." % count_roster(dest))
+            close()
+
+        def close():
+            cv.unbind_all("<MouseWheel>")
+            top.destroy()
+
+        make_button(bar2, "Salvar cadastro", save, primary=True).pack(side="right")
+        make_button(bar2, "Cancelar", close).pack(side="right", padx=(0, 10))
+        top.protocol("WM_DELETE_WINDOW", close)
+
     def choose_roster():
         if state["busy"]:
             return
@@ -1009,10 +1269,7 @@ def run_gui():
         folder = filedialog.askdirectory(title="Escolha a pasta com as fotos da festa")
         if not folder:
             return
-        state["busy"] = True
-        add_btn.configure(state="disabled", bg=ACCENT)
-        roster_btn.configure(state="disabled")
-        prog["value"] = 0
+        busy(True)
         threading.Thread(target=worker, args=(folder,), daemon=True).start()
 
     def poll():
@@ -1025,10 +1282,12 @@ def run_gui():
                     prog["maximum"] = m[2]
                     prog["value"] = m[1]
                     status_var.set("Analisando fotos... %d de %d" % (m[1], m[2]))
+                elif m[0] == "cards":
+                    busy(False)
+                    status_var.set("Fichas lidas. Confira os nomes.")
+                    review_cards(m[1], m[2])
                 elif m[0] in ("done", "error"):
-                    state["busy"] = False
-                    add_btn.configure(state="normal")
-                    roster_btn.configure(state="normal")
+                    busy(False)
                     if m[0] == "done":
                         n = len(subdirs(m[1]))
                         rep = m[2]
@@ -1054,7 +1313,7 @@ def run_gui():
         win.after(100, poll)
 
     add_btn.configure(command=add_folder)
-    roster_btn.configure(command=choose_roster)
+    roster_btn.configure(command=roster_menu)
     roster_clear.bind("<Button-1>", clear_roster)
     show_roster()
     back_btn.configure(command=go_back)
@@ -1090,8 +1349,26 @@ def run_cli(folder):
     print(ev)
 
 
+def self_test():
+    """Usado no build: confere se o .exe abre os modelos e o leitor de fichas."""
+    out = os.path.join(app_dir(), "autoteste.txt")
+    try:
+        engine = FaceEngine()
+        img = np.full((200, 600, 3), 255, np.uint8)
+        cv2.putText(img, "MARIA 4821", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
+        name, code, lines = read_card(img)
+        assert engine.detect(img).shape[1] == 15
+        msg = "ok %s %s" % (name, code)
+    except Exception as e:
+        msg = "erro %r" % e
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(msg)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+    if len(sys.argv) > 1 and sys.argv[1] == "--autoteste":
+        self_test()
+    elif len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         run_cli(sys.argv[1])
     else:
         run_gui()

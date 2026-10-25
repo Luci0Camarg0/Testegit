@@ -19,10 +19,19 @@ O QUE O PROGRAMA FAZ
   Digite o novo nome e aperte Enter (Esc cancela). Nomes repetidos não são aceitos.
 
 CADASTRO DE ALUNOS (para separar só os formandos)
+Opção 1 - Fotos das fichas (mais fácil):
+- Clique em "Cadastro de alunos" > "Fotos das fichas" e escolha a pasta com as
+  fotos de cada aluno segurando a ficha de identificação.
+- O programa lê o nome e o código da ficha e guarda o rosto do aluno.
+- Uma janela mostra o rosto e o nome lido (ex.: maria eduarda_4821). Corrija o
+  que estiver errado, desmarque fotos sem aluno e clique em "Salvar cadastro".
+- As pastas da formatura saem com esse nome: maria eduarda_4821.
+
+Opção 2 - Pasta com fotos já nomeadas:
 - Crie uma pasta com UMA foto de cada aluno, só o aluno e de frente, com o nome
   do aluno no arquivo:   Cadastro\Maria Silva.jpg,  Cadastro\João Souza.jpg ...
   (com mais de uma foto do mesmo aluno: Cadastro\Maria Silva\foto1.jpg, foto2.jpg)
-- No programa, clique em "Cadastro de alunos" e escolha essa pasta. Ela fica salva.
+- No programa, clique em "Cadastro de alunos" > "Pasta com uma foto de cada aluno". Ela fica salva.
 - Agora, ao adicionar as fotos da formatura, o programa cria uma pasta com o NOME
   de cada aluno e ignora quem não está no cadastro (pais, convidados).
 - No fim ele avisa quais alunos não apareceram em nenhuma foto.

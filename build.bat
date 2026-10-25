@@ -25,6 +25,7 @@ call venv\Scripts\activate.bat
 echo [2/4] Instalando bibliotecas...
 python -m pip install --upgrade pip >nul
 python -m pip install -r requirements.txt || goto :erro
+python -m pip install --no-deps rapidocr_onnxruntime==1.4.4 || goto :erro
 
 echo [3/4] Baixando modelos de reconhecimento facial...
 if not exist models mkdir models
@@ -41,6 +42,7 @@ pyinstaller --noconfirm --clean --onefile --windowed ^
     --add-data "models;models" ^
     --add-data "assets;assets" ^
     --icon "assets\icone.ico" ^
+    --collect-all rapidocr_onnxruntime ^
     reconhecimento.py || goto :erro
 
 echo.

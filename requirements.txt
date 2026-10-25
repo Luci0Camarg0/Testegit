@@ -1,4 +1,10 @@
 opencv-python-headless>=4.8,<5
 numpy
 pillow
+onnxruntime
+pyclipper
+shapely
+six
+pyyaml
+tqdm
 pyinstaller
