@@ -18,6 +18,16 @@ O QUE O PROGRAMA FAZ
 - Botão direito numa festa ou num aluno > "Renomear" (ou selecione e aperte F2).
   Digite o novo nome e aperte Enter (Esc cancela). Nomes repetidos não são aceitos.
 
+CADASTRO DE ALUNOS (para separar só os formandos)
+- Crie uma pasta com UMA foto de cada aluno, só o aluno e de frente, com o nome
+  do aluno no arquivo:   Cadastro\Maria Silva.jpg,  Cadastro\João Souza.jpg ...
+  (com mais de uma foto do mesmo aluno: Cadastro\Maria Silva\foto1.jpg, foto2.jpg)
+- No programa, clique em "Cadastro de alunos" e escolha essa pasta. Ela fica salva.
+- Agora, ao adicionar as fotos da formatura, o programa cria uma pasta com o NOME
+  de cada aluno e ignora quem não está no cadastro (pais, convidados).
+- No fim ele avisa quais alunos não apareceram em nenhuma foto.
+- Clique em "remover cadastro" para voltar ao modo automático (aluno_1, aluno_2...).
+
 COMO GERAR O .EXE (uma vez só)
 Opção A - no seu computador Windows:
   1. Instale o Python 3.12: https://www.python.org/downloads/
