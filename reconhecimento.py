@@ -30,7 +30,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 6
+VERSAO = 7
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -705,6 +705,7 @@ ROW_SEL = "#7a1c1c"
 ACCENT = "#c62828"
 ACCENT_HOVER = "#e53935"
 FG = "#ffffff"
+YELLOW = "#ffd600"
 FG_DIM = "#b0b0b0"
 LOGO_OPACITY = 0.22         # logo de fundo bem suave para nao atrapalhar a leitura
 ROW_H = 34
@@ -803,6 +804,7 @@ def run_gui():
     add_btn = make_button(top, "+  Adicionar pasta de fotos", None, primary=True)
     add_btn.pack(side="left")
     back_btn = make_button(top, "‹  Voltar", None)
+    back_btn.configure(fg=YELLOW, activeforeground=YELLOW, disabledforeground="#857000")
     back_btn.pack(side="left", padx=(10, 0))
     roster_btn = make_button(top, "Cadastro de alunos", None)
     roster_btn.pack(side="left", padx=(10, 0))
