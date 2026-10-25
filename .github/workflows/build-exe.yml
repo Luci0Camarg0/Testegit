@@ -1,0 +1,38 @@
+name: Gerar exe para Windows
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+
+      - name: Baixar modelos
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force models | Out-Null
+          Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx -OutFile models/face_detection_yunet_2023mar.onnx
+          Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx -OutFile models/face_recognition_sface_2021dec.onnx
+
+      - name: Gerar exe
+        run: pyinstaller --noconfirm --onefile --windowed --name ReconhecimentoFacial --add-data "models;models" reconhecimento.py
+
+      - name: Testar se o exe abre os modelos
+        shell: pwsh
+        run: |
+          python -c "import reconhecimento as R; e=R.FaceEngine(); print('modelos OK')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReconhecimentoFacial
+          path: dist/ReconhecimentoFacial.exe

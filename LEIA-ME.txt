@@ -1,0 +1,40 @@
+RECONHECIMENTO FACIAL DE FESTAS
+===============================
+
+O QUE O PROGRAMA FAZ
+- Clique em "+ Adicionar pasta de fotos" e escolha a pasta com as fotos da festa.
+- O programa encontra os rostos, agrupa por pessoa e cria, ao lado do .exe:
+
+      Eventos\festa_1\aluno_1, aluno_2, aluno_3 ...
+
+  Na próxima pasta enviada ele cria festa_2, depois festa_3 (nunca repete nomes).
+- Cada pasta aluno_X recebe uma CÓPIA de todas as fotos em que aquela pessoa
+  aparece. Uma foto com 5 pessoas vai para 5 pastas. As fotos originais não são alteradas.
+- aluno_1 é quem aparece em mais fotos, aluno_2 o segundo, e assim por diante.
+- Barra de pesquisa:
+    * na tela "Eventos" ela procura as festas E as pastas aluno_X dentro delas;
+    * dentro de uma festa ela procura só as pastas aluno_X daquela festa.
+- Dois cliques numa festa abre a festa. Dois cliques num aluno abre a pasta no Explorer.
+
+COMO GERAR O .EXE (uma vez só)
+Opção A - no seu computador Windows:
+  1. Instale o Python 3.12: https://www.python.org/downloads/
+     (na instalação marque "Add python.exe to PATH").
+  2. Extraia este .zip numa pasta e dê dois cliques em build.bat.
+  3. Espere terminar (5 a 10 minutos na primeira vez). O programa fica em
+     dist\ReconhecimentoFacial.exe. Pode copiar esse .exe para onde quiser.
+
+Opção B - pelo GitHub (sem instalar nada):
+  1. Crie um repositório no GitHub e envie todos estes arquivos
+     (incluindo a pasta .github).
+  2. Abra a aba "Actions"; o processo "Gerar exe para Windows" roda sozinho.
+  3. Ao terminar, baixe o "ReconhecimentoFacial" em "Artifacts".
+
+OBSERVAÇÕES
+- Funciona sem internet (os modelos de IA vão dentro do .exe).
+- Rostos muito pequenos, de costas ou muito borrados são ignorados.
+- O Windows pode mostrar "O Windows protegeu o computador" na primeira vez,
+  porque o .exe não é assinado. Clique em "Mais informações" > "Executar assim mesmo".
+- Ajuste fino (no início de reconhecimento.py):
+    SAME_PERSON = 0.40  -> aumente (ex.: 0.45) se pessoas diferentes caírem na mesma pasta;
+                           diminua (ex.: 0.35) se a mesma pessoa for dividida em várias pastas.
