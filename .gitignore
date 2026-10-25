@@ -5,3 +5,4 @@ __pycache__/
 *.spec
 models/
 Eventos/
+ocrdl/

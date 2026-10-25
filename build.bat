@@ -36,6 +36,11 @@ if not exist models\face_recognition_sface_2021dec.onnx (
     powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx' -OutFile 'models\face_recognition_sface_2021dec.onnx'" || goto :erro
 )
 
+if not exist models\PP-OCRv6_rec_small.onnx (
+    python -m pip download --no-deps rapidocr==3.10.0 -d ocrdl || goto :erro
+    python -c "import zipfile,glob; z=zipfile.ZipFile(glob.glob('ocrdl/rapidocr-*.whl')[0]); open('models/PP-OCRv6_rec_small.onnx','wb').write(z.read('rapidocr/models/PP-OCRv6_rec_small.onnx'))" || goto :erro
+)
+
 echo [4/4] Gerando o .exe (pode levar alguns minutos)...
 pyinstaller --noconfirm --clean --onefile --windowed ^
     --name ReconhecimentoFacial ^

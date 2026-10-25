@@ -29,6 +29,11 @@ jobs:
           Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx -OutFile models/face_detection_yunet_2023mar.onnx
           Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx -OutFile models/face_recognition_sface_2021dec.onnx
 
+      - name: Baixar leitor de letra de mao (PP-OCRv6)
+        run: |
+          python -m pip download --no-deps rapidocr==3.10.0 -d ocrdl
+          python -c "import zipfile,glob; z=zipfile.ZipFile(glob.glob('ocrdl/rapidocr-*.whl')[0]); open('models/PP-OCRv6_rec_small.onnx','wb').write(z.read('rapidocr/models/PP-OCRv6_rec_small.onnx'))"
+
       - name: Conferir numero da versao
         shell: pwsh
         run: |
@@ -48,6 +53,7 @@ jobs:
           $r = Get-Content dist/autoteste.txt
           Write-Output $r
           if (-not $r.StartsWith("ok")) { exit 1 }
+          if (-not $r.Contains("mao=sim")) { Write-Error "leitor de letra de mao nao foi junto"; exit 1 }
           Remove-Item dist/autoteste.txt
 
       - name: Testar o reiniciar depois de atualizar
@@ -68,6 +74,18 @@ jobs:
         with:
           name: ReconhecimentoFacial
           path: dist/ReconhecimentoFacial.exe
+
+      - name: Publicar o leitor de letra de mao (para quem tem o .exe antigo)
+        if: github.ref == 'refs/heads/reconhecimento-facial'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view modelos *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create modelos models/PP-OCRv6_rec_small.onnx --target $env:GITHUB_SHA --title "Modelos" --notes "Arquivos baixados pelo programa quando precisa."
+          }
+          $global:LASTEXITCODE = 0
 
       - name: Publicar link fixo de download (release "ultima")
         if: github.ref == 'refs/heads/reconhecimento-facial'

@@ -30,7 +30,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 9
+VERSAO = 10
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -437,14 +437,46 @@ CARD_SKIP = {"formatura", "formandos", "colegio", "colégio", "escola", "turma",
              "universidade", "faculdade", "gala", "eventos", "ficha", "identificacao",
              "identificação"}
 
+# Leitor de letra de mao (PP-OCRv6). Vai dentro do .exe novo; quem tem o .exe
+# antigo baixa uma vez para a pasta "atualizacao".
+HAND_MODEL = "PP-OCRv6_rec_small.onnx"
+HAND_URL = "https://github.com/Luci0Camarg0/Testegit/releases/download/modelos/" + HAND_MODEL
+
 _ocr = None
 
 
-def get_ocr():
+def hand_model(log=print, download=True):
+    dl = os.path.join(os.path.dirname(data_dir()), "atualizacao", "modelos")
+    for d in (os.path.join(resource_dir(), "models"), os.path.join(app_dir(), "models"), dl):
+        p = os.path.join(d, HAND_MODEL)
+        if os.path.isfile(p) and os.path.getsize(p) > 1000000:
+            return p
+    if not download:
+        return None
+    try:
+        log("Baixando o leitor de letra de mão (21 MB, só desta vez)...")
+        data = _get(HAND_URL, timeout=180)
+        if len(data) < 1000000:
+            return None
+        os.makedirs(dl, exist_ok=True)
+        p = os.path.join(dl, HAND_MODEL)
+        with open(p + ".tmp", "wb") as f:
+            f.write(data)
+        os.replace(p + ".tmp", p)
+        return p
+    except Exception:
+        return None
+
+
+def get_ocr(log=print):
     global _ocr
     if _ocr is None:
         from rapidocr_onnxruntime import RapidOCR
-        _ocr = RapidOCR()
+        rec = hand_model(log)
+        try:
+            _ocr = RapidOCR(rec_model_path=rec) if rec else RapidOCR()
+        except Exception:
+            _ocr = RapidOCR()
     return _ocr
 
 
@@ -482,9 +514,30 @@ def parse_card(lines):
     return name.strip().lower(), code
 
 
+_ACCENTS = str.maketrans("áàâãäåéèêëíìîïóòôõöúùûüçñýÿāēīōū",
+                         "aaaaaaeeeeiiiiooooouuuucnyyaeiou")
+
+
+def plain(text):
+    """minusculas, sem acento, so letras e espacos."""
+    text = text.lower().translate(_ACCENTS)
+    return " ".join(re.findall(r"[a-z]+", text))
+
+
 def folder_name_for(name, code):
-    base = re.sub(r"[%s]" % re.escape(INVALID_CHARS), "", name).strip() or "sem_nome"
+    """nome_do_aluno_codigo (ex.: alicia_ferreira_guimaraes_0101)."""
+    base = "_".join(plain(name).split()) or "sem_nome"
     return "%s_%s" % (base, code) if code else base
+
+
+def _edit(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
 
 
 def read_card(img):
@@ -509,6 +562,216 @@ def card_region(img, box):
     return img[y0:y1, x0:x1]
 
 
+def find_card_box(region):
+    """Acha o papel branco da ficha no recorte. Retorna x0, y0, x1, y1 ou None."""
+    h, w = region.shape[:2]
+    k = 400.0 / max(h, w)
+    small = cv2.resize(region, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    mask = ((hsv[:, :, 2] > 150) & (hsv[:, :, 1] < 55)).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return None
+    # a ficha fica na frente do aluno: so conta o branco que passa pelo meio
+    # do recorte (parede branca dos lados nao e ficha)
+    mid0, mid1 = 0.35 * small.shape[1], 0.65 * small.shape[1]
+    cs = [q for q in cs if cv2.boundingRect(q)[0] < mid1 and
+          cv2.boundingRect(q)[0] + cv2.boundingRect(q)[2] > mid0]
+    if not cs:
+        return None
+    cnt = max(cs, key=cv2.contourArea)
+    area = cv2.contourArea(cnt)          # contorno cheio: o texto da ficha nao conta
+    x, y, bw, bh = cv2.boundingRect(cnt)
+    # sem papel branco grande = nao e foto de ficha (pula a leitura, que e lenta)
+    if area < 0.04 * small.shape[0] * small.shape[1] or area < 0.35 * bw * bh:
+        return None
+    pad = 0.03 * max(bw, bh)
+    return (int(max(0, (x - pad) / k)), int(max(0, (y - pad) / k)),
+            int(min(w, (x + bw + pad) / k)), int(min(h, (y + bh + pad) / k)))
+
+
+def _box(r):
+    return np.array(r[0], np.float32)
+
+
+# nomes e sobrenomes comuns: ajudam a corrigir a letra de mao ("ferveira" -> "ferreira")
+NAMES = set("""
+alice alicia amanda ana beatriz bianca bruna camila carolina cecilia clara dafne
+daniela debora eduarda elisa emanuelly emilly ester fernanda gabriela gabrielly
+giovana giovanna helena heloisa isabel isabela isabella isadora jamile joana julia
+juliana lara larissa laura lavinia leticia livia lorena luana luiza manuela marcela
+maria mariana marina melissa milena mirela natalia nicole olivia paula pietra rafaela
+raissa rebeca sabrina sara sarah sofia sophia stella stephany tais thais valentina
+vitoria yasmin yasmim agatha allana ana alana ayla brenda caroline catarina eloa
+emanuele esther evelyn evellyn flavia geovana giulia ingrid isis jessica kamila
+karina kauany kelly kemilly lais lethicia luna maite maisa mel nathalia nayara
+pamela priscila rayssa samara samira tainara talita vanessa vivian
+arthur artur bernardo bruno caio carlos cauan caua daniel davi david diego eduardo
+enzo erick felipe fernando gabriel guilherme gustavo heitor henrique igor isaac
+joao jorge jose juan kaique kaio kaua kaue leandro leonardo lorenzo lucas luan luca
+luis luiz marcelo marcos matheus mateus miguel murilo nicolas otavio paulo pedro
+rafael renan ricardo rodrigo samuel thiago tiago vinicius vitor victor wesley yago
+yuri breno benjamin anthony andre alexandre antonio augusto benicio calebe cristian
+emanuel enrico fabio francisco gael hugo ian joaquim kevin levi lorenzo mauricio
+nathan noah raul ryan theo thomas valentim wallace william
+silva santos oliveira souza sousa rodrigues ferreira alves pereira lima gomes costa
+ribeiro martins carvalho almeida lopes soares fernandes vieira barbosa rocha dias
+nascimento andrade moreira nunes marques machado mendes freitas cardoso ramos
+goncalves santana teixeira araujo pinto correia moura cavalcanti batista campos
+monteiro castro melo miranda reis barros duarte guimaraes figueiredo azevedo
+borges brito cunha farias fonseca franco garcia leite lourenco macedo magalhaes
+matos medeiros morais neves pacheco peixoto prado queiroz rezende sales sampaio
+siqueira tavares toledo vasconcelos xavier camargo candido baptista bastos bueno
+caetano coelho cruz dantas domingues esteves estevam fabri galvao gimenes
+junior filho neto sobrinho
+""".split())
+
+
+def best_name(reads, vocab):
+    """
+    Junta varias leituras do mesmo nome escrito a mao: para cada palavra escolhe
+    a forma que mais combina com as leituras, com os nomes comuns e com as
+    outras palavras da ficha (nome dos pais, e-mail).
+    """
+    lists = [r.split() for r in reads if r.split()]
+    if not lists:
+        return ""
+    counts = {}
+    for l in lists:
+        counts[len(l)] = counts.get(len(l), 0) + 1
+    n = max(counts, key=lambda k: (counts[k], k))
+    rows = [l for l in lists if len(l) == n]
+    out = []
+    for i in range(n):
+        ev = [l[i] for l in rows]
+        med = min(ev, key=lambda c: sum(_edit(c, e) for e in ev))
+
+        def near(w):
+            lim = 0.45 if len(med) >= 5 else 0.34
+            return abs(len(w) - len(med)) <= 2 and _edit(w, med) <= max(1, int(lim * len(med)))
+        cands = set(ev) | {v for v in vocab if len(v) >= 4 and near(v)} | \
+            {v for v in NAMES if near(v)}
+
+        def score(c):
+            s = sum(max(0.0, 1 - _edit(c, e) / float(max(len(c), len(e)))) for e in ev)
+            return s + (1.5 if c in vocab else 0) + (2 if c in NAMES else 0)
+        out.append(max(sorted(cands), key=score))
+    return " ".join(out)
+
+
+def _name_read(text):
+    """Texto lido no campo do nome -> palavras do nome (sem o rotulo e sem "Serie")."""
+    low = text.lower()
+    for key in ("formando", "ormando", "mando", "ando:"):
+        if key in low:
+            text = text[low.find(key) + len(key):]
+            break
+    words = []
+    for w in plain(text).split():
+        if w.endswith("serie") and len(w) > 5:
+            w = w[:-5]
+        if w in ("serie", "n", "no") or len(w) < 2:
+            continue
+        words.append(w)
+    return " ".join(words)
+
+
+def read_gala_card(img, res):
+    """
+    Ficha da Gala Eventos: nome escrito em "Nome/Formando" e o numero grande
+    do canto de cima. Retorna (nome, codigo) ou None se nao for esse modelo.
+    """
+    lab = [r for r in res if "formand" in r[1].lower()]
+    if not lab:
+        return None
+    ocr = get_ocr()
+    lab = lab[0]
+    b = _box(lab)
+    c = b.mean(0)
+    h = float(b[:, 1].max() - b[:, 1].min())
+    fac = [r for r in res if "faculdade" in r[1].lower() or "colegio" in plain(r[1])]
+    top = float(_box(fac[0])[:, 1].min()) if fac else float(c[1] - 2 * h)
+    sp = float(abs(c[1] - _box(fac[0]).mean(0)[1])) if fac else 1.3 * h
+
+    # codigo: o numero escrito grande acima da linha "Faculdade/Colegio". O
+    # tracado grosso de caneta e lido melhor com a imagem menor.
+    W = img.shape[1]
+    zone = img[0:int(max(10, top)), int(0.45 * W):W]
+    found = [(r, 1.0) for r in res if _box(r)[:, 1].max() <= top + 0.3 * h]
+    if zone.size:
+        for sc in (0.3, 0.45, 0.6, 1.0):
+            z = cv2.resize(zone, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA) if sc != 1 else zone
+            found += [(r, 1.0 / sc) for r in (ocr(z)[0] or [])]
+    votes = {}
+    for r, k in found:
+        txt = r[1].replace(" ", "")
+        dig = sum(ch.isdigit() for ch in txt)
+        if r[2] >= 0.6 and dig >= 2 and dig >= 0.8 * len(txt):
+            d = re.sub(r"\D", "", txt)
+            size = float(np.ptp(_box(r)[:, 1])) * k
+            v = votes.get(d, (0, 0.0))
+            votes[d] = (v[0] + 1, max(v[1], size))
+    # o mais lido ganha; empate: o mais completo ("243" ganha de "24")
+    code = max(votes, key=lambda d: (votes[d][0], len(d), votes[d][1])) if votes else ""
+
+    # nome: varias leituras da linha "Nome/Formando" (desentortada), com e sem
+    # folga para cima (a letra de mao sobe da linha)
+    reads = [_name_read(lab[1])]
+    ang = float(np.degrees(np.arctan2(b[1][1] - b[0][1], b[1][0] - b[0][0])))
+    rot = cv2.getRotationMatrix2D((float(c[0]), float(c[1])), ang, 1.0)
+    img_r = cv2.warpAffine(img, rot, (img.shape[1], img.shape[0]), borderValue=(255, 255, 255))
+    rb = cv2.transform(b[None], rot)[0]
+    left = float(rb[:, 0].min())
+    right = float(img.shape[1])
+    for r in res:
+        rb2 = cv2.transform(_box(r)[None], rot)[0]
+        if (("n°" in r[1] or "nº" in r[1]) and rb2[:, 0].min() > left + 2 * h
+                and abs(rb2[:, 1].mean() - c[1]) < 0.6 * sp):
+            right = min(right, float(rb2[:, 0].min()))
+    for up, down in ((0.8, 0.3), (0.65, 0.35)):
+        band = img_r[int(max(0, c[1] - up * sp)):int(c[1] + down * sp),
+                     int(max(0, left - 5)):int(right)]
+        if band.shape[0] < 8 or band.shape[1] < 20:
+            continue
+        for sc in (1, 2):
+            im = cv2.resize(band, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC) \
+                if sc > 1 else band
+            rr, _ = ocr(im, use_det=False, use_cls=False)
+            if rr and rr[0][1] >= 0.5:
+                reads.append(_name_read(rr[0][0]))
+    vocab = set()
+    for r in res:
+        if r is not lab:
+            vocab.update(w for w in plain(r[1]).split() if len(w) >= 4)
+    return best_name(reads, vocab), code
+
+
+def read_card_photo(img, face_box):
+    """
+    Le a ficha que o aluno segura abaixo do rosto. Retorna (nome, codigo, ficha
+    da Gala Eventos?).
+    """
+    region = card_region(img, face_box)
+    if region is None:
+        return "", "", False
+    cb = find_card_box(region)
+    if cb is None:
+        return "", "", False
+    card = region[cb[1]:cb[3], cb[0]:cb[2]]
+    hh, ww = card.shape[:2]
+    k = min(1.0, 1600.0 / max(hh, ww))
+    if k < 1:
+        card = cv2.resize(card, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    res, _ = get_ocr()(card)
+    res = [r for r in (res or []) if r[2] >= 0.5]
+    gala = read_gala_card(card, res)
+    if gala is not None:
+        return gala[0], gala[1], True
+    name, code = parse_card([r[1] for r in res])
+    return name, code, False
+
+
 def find_cards(images, photo_ids, scores, boxes, log=print,
                progress=lambda done, total, text=None: None):
     """
@@ -522,6 +785,8 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
             sure.setdefault(int(ph), []).append(k)
     cands = sorted(ph for ph, ks in sure.items() if len(ks) <= 3)
     cards = {}
+    if cands:
+        get_ocr(log)
     for n, ph in enumerate(cands):
         progress(n + 1, len(cands), "Procurando fichas...")
         ks = sure[ph]
@@ -530,16 +795,17 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
                 0.6 * boxes[k][2] * boxes[k][3]:
             continue            # dois rostos do mesmo tamanho: foto de grupo, nao ficha
         img = read_image(images[ph])
-        crop = card_region(img, boxes[k]) if img is not None else None
-        if crop is None:
+        if img is None:
             continue
         try:
-            name, code, _lines = read_card(crop)
+            name, code, gala = read_card_photo(img, boxes[k])
         except Exception as e:
             log("Leitor de fichas falhou: %s" % e)
             break
-        if code and len(name.replace(" ", "")) >= 3:
-            cards[ph] = (folder_name_for(name, code), k)
+        # na ficha da Gala Eventos, sem numero legivel a pasta fica so com o nome
+        if (code and len(name.replace(" ", "")) >= 3) or \
+                (gala and len(name.split()) >= 2 and len(name.replace(" ", "")) >= 6):
+            cards[ph] = (folder_name_for(name, code), k, code)
             log("Ficha: %s -> %s" % (os.path.basename(images[ph]), cards[ph][0]))
     return cards
 
@@ -578,9 +844,8 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
 
     if cards:
         roster, by_code = {}, {}
-        for ph, (folder, k) in sorted(cards.items()):
-            code = folder.rsplit("_", 1)[-1]
-            folder = by_code.setdefault(code, folder)   # mesma ficha lida 2x: um aluno so
+        for ph, (folder, k, code) in sorted(cards.items()):
+            folder = by_code.setdefault(code or folder, folder)   # mesma ficha 2x: um aluno so
             roster.setdefault(folder, []).append(embs[k])
         roster = {n: np.array(v, np.float32) for n, v in roster.items()}
         log("Separando os %d aluno(s) das fichas..." % len(roster))
@@ -1245,7 +1510,8 @@ def self_test():
         cv2.putText(img, "MARIA 4821", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
         name, code, lines = read_card(img)
         assert engine.detect(img).shape[1] == 15
-        msg = "ok v%d %s %s" % (VERSAO, name, code)
+        msg = "ok v%d %s %s mao=%s" % (VERSAO, name, code,
+                                         "sim" if hand_model(download=False) else "nao")
     except Exception as e:
         msg = "erro %r" % e
     with open(out, "w", encoding="utf-8") as f:

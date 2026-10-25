@@ -24,12 +24,18 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
   misturadas com as outras ou em subpastas.
 - Clique em "+ Adicionar pasta de fotos". O programa acha sozinho as fotos de
   ficha, lê o nome e o código e cria uma pasta para cada aluno:
-      Eventos\festa_1\maria eduarda_4821
+      Eventos\festa_1\alicia_ferreira_guimaraes_0101
 - Cada pasta recebe as fotos em que aquele aluno aparece. Quem não tem ficha
   (pais, convidados) é ignorado. A foto da ficha não vai para a pasta.
 - No fim ele avisa quais alunos com ficha não apareceram em outras fotos.
+- Na ficha da Gala Eventos ele lê o nome escrito em "Nome/Formando" e o número
+  grande do canto de cima. O nome escrito à mão é conferido com os outros
+  campos (nome dos pais, e-mail) e com nomes comuns. Se o número não der
+  para ler, a pasta sai só com o nome (alicia_ferreira_guimaraes).
 - A foto da ficha deve mostrar só o aluno, de frente, com a ficha abaixo do
   rosto. Se o nome sair errado, clique com o botão direito na pasta > Renomear.
+- Na primeira vez, quem tem o .exe antigo baixa o leitor de letra de mão
+  (21 MB, uma vez só).
 - Sem nenhuma foto de ficha na pasta, o programa separa todas as pessoas em
   aluno_1, aluno_2... como antes.
 
