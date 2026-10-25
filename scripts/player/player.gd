@@ -1,6 +1,7 @@
 extends CharacterBody3D
 ## Controle do jogador em primeira pessoa:
 ## andar (WASD), correr (Shift), pular (Espaço) e olhar com o mouse.
+## Etapa 4: dano de queda e o jogador fica parado enquanto está morto.
 
 @export var velocidade_andar: float = 5.0
 @export var velocidade_correr: float = 8.5
@@ -9,10 +10,15 @@ extends CharacterBody3D
 @export var multiplicador_queda: float = 1.4       # cai mais rápido do que sobe (pulo mais firme)
 @export var aceleracao: float = 10.0
 @export var sensibilidade_mouse: float = 0.0025   # depois virá do menu Configurações
+@export var velocidade_queda_segura: float = 14.0  # caindo mais rápido que isso (uns 3,5 m), machuca
+@export var dano_por_queda: float = 4.0            # dano para cada m/s acima do seguro
 
 var gravidade: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var ponto_de_renascer := Vector3.ZERO
 var tempo_balanco := 0.0
+var correndo := false
+
+@onready var status: Node = $Status
 
 @onready var cabeca: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
@@ -38,6 +44,10 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if status.morto:
+		velocity = Vector3.ZERO
+		return
+
 	# 1. Gravidade (mais forte na descida, para o pulo não parecer "flutuante")
 	if not is_on_floor():
 		var forca := gravidade * multiplicador_gravidade
@@ -52,7 +62,7 @@ func _physics_process(delta: float) -> void:
 	# 3. Direção que o jogador quer andar (relativa para onde ele está olhando)
 	var entrada := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 	var direcao := (transform.basis * Vector3(entrada.x, 0, entrada.y)).normalized()
-	var correndo := Input.is_action_pressed("sprint") and entrada.y < 0   # só corre para frente
+	correndo = Input.is_action_pressed("sprint") and entrada.y < 0   # só corre para frente
 	var velocidade_alvo := velocidade_correr if correndo else velocidade_andar
 
 	# 4. Acelera e freia suavemente (no ar o controle é menor)
@@ -60,7 +70,13 @@ func _physics_process(delta: float) -> void:
 	velocity.x = lerpf(velocity.x, direcao.x * velocidade_alvo, clampf(controle * delta, 0, 1))
 	velocity.z = lerpf(velocity.z, direcao.z * velocidade_alvo, clampf(controle * delta, 0, 1))
 
+	var estava_no_ar := not is_on_floor()
+	var velocidade_caindo := -velocity.y
 	move_and_slide()
+
+	# Dano de queda: ao tocar o chão depois de cair rápido demais
+	if estava_no_ar and is_on_floor() and velocidade_caindo > velocidade_queda_segura:
+		status.receber_dano((velocidade_caindo - velocidade_queda_segura) * dano_por_queda)
 
 	_balancar_camera(delta)
 
@@ -79,6 +95,10 @@ func _balancar_camera(delta: float) -> void:
 	var alvo := Vector3(cos(tempo_balanco * 0.5) * 0.04, sin(tempo_balanco) * 0.05, 0) * intensidade
 	camera.position = camera.position.lerp(alvo, clampf(10.0 * delta, 0, 1))
 	bracos.definir_movimento(intensidade, tempo_balanco)
+
+
+func esta_correndo() -> bool:
+	return correndo and Vector2(velocity.x, velocity.z).length() > 1.0
 
 
 func renascer() -> void:

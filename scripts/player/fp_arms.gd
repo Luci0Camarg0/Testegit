@@ -9,6 +9,13 @@ const COR_PUNHO := Color(0.27, 0.33, 0.18)    # verde mais escuro (punho dobrado
 const COR_LUVA := Color(0.20, 0.18, 0.17)     # luva escura
 const COR_PELE := Color(0.95, 0.80, 0.68)     # pele clara
 
+## Falso = só a mão direita (estilo sobrevivência). Algumas armas futuras vão ligar as duas.
+@export var duas_maos: bool = false:
+	set(valor):
+		duas_maos = valor
+		if is_node_ready():
+			get_node("BracoEsquerdo").visible = valor
+
 var posicao_base := Vector3.ZERO
 var balanco_mouse := Vector2.ZERO
 var intensidade_passos := 0.0
@@ -18,6 +25,7 @@ var tempo_passos := 0.0
 func _ready() -> void:
 	add_child(_criar_braco(1.0))    # braço direito
 	add_child(_criar_braco(-1.0))   # braço esquerdo
+	get_node("BracoEsquerdo").visible = duas_maos
 	posicao_base = position
 
 

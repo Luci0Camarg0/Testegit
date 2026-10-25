@@ -10,7 +10,9 @@ const TECLAS := {
 	"move_right": KEY_D,
 	"jump": KEY_SPACE,
 	"sprint": KEY_SHIFT,
-	"acelerar_tempo": KEY_T,   # segure T para o tempo passar rápido (para testar o dia e a noite)
+	"acelerar_tempo": KEY_T,
+	"interagir": KEY_E,        # beber água, comer frutinhas (e mais coisas nas próximas etapas)
+	"renascer": KEY_ENTER,   # segure T para o tempo passar rápido (para testar o dia e a noite)
 }
 
 

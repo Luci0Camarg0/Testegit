@@ -22,6 +22,7 @@ const COR_ARBUSTO := Color(0.30, 0.62, 0.22)
 # a distância em que ainda é desenhado e o formato da colisão.
 var tipos := {}
 var colisoes: StaticBody3D
+var arbustos: Array[Vector3] = []   # onde tem frutinhas para comer (Etapa 4)
 
 
 func _ready() -> void:
@@ -96,12 +97,22 @@ func espalhar() -> void:
 		if not blocos[chave].has(nome):
 			blocos[chave][nome] = []
 		blocos[chave][nome].append(posicao)
+		if nome == "arbusto":
+			arbustos.append(posicao.origin)
 
 		_criar_colisao(tipo, posicao.origin, escala)
 
 	for chave in blocos:
 		for nome in blocos[chave]:
 			_desenhar_bloco(chave, nome, blocos[chave][nome])
+
+
+## Tem um arbusto com frutinhas a até "raio" metros deste ponto?
+func arbusto_perto(ponto: Vector3, raio: float) -> bool:
+	for arbusto in arbustos:
+		if Vector2(arbusto.x - ponto.x, arbusto.z - ponto.z).length() < raio:
+			return true
+	return false
 
 
 func _sortear_tipo(bioma: Bioma, valor: float) -> String:
