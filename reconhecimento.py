@@ -38,9 +38,13 @@ MODEL_URLS = {
 
 # Ajustes de deteccao / agrupamento
 DETECT_MAX_SIDE = 1920      # fotos maiores sao reduzidas so para detectar
-MIN_FACE_PX = 36            # ignora rostos muito pequenos (ruido)
-MIN_SCORE = 0.80            # confianca minima do detector
-SAME_PERSON = 0.40          # similaridade (cosseno) para considerar a mesma pessoa
+MIN_FACE_PX = 28            # ignora rostos muito pequenos (ruido)
+MIN_SCORE = 0.60            # confianca minima do detector
+ROTATIONS = (0, 90, 270, 180)   # procura tambem rostos deitados / de cabeca para baixo
+CLOSEUP_SIDE = 640          # tamanho usado para achar rostos muito grandes (fotos de perto)
+SAME_PERSON = 0.36          # similaridade (cosseno) para juntar rostos
+MERGE_GROUPS = 0.42         # similaridade entre medias para juntar grupos da mesma pessoa
+SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ignorada (maos, pele...)
 
 
 # ---------------------------------------------------------------------------
@@ -157,24 +161,135 @@ class FaceEngine:
         self.recognizer = cv2.FaceRecognizerSF.create(
             find_model(RECOGNIZER_FILE, log), "")
 
+    def _detect_once(self, img):
+        self.detector.setInputSize((img.shape[1], img.shape[0]))
+        _, faces = self.detector.detect(img)
+        return np.zeros((0, 15), np.float32) if faces is None else faces.copy()
+
+    def _detect_multiscale(self, img):
+        """Detecta em tamanho normal e tambem numa versao pequena com bordas,
+        que acha rostos muito grandes (fotos bem de perto / selfies)."""
+        h, w = img.shape[:2]
+        found = list(self._detect_once(img))
+        pad = int(0.25 * max(h, w))
+        padded = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT)
+        k = CLOSEUP_SIDE / float(max(padded.shape[:2]))
+        small = cv2.resize(padded, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        for f in self._detect_once(small):
+            f[:14] /= k
+            f[[0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]] -= pad   # tira a borda
+            found.append(f)
+        faces = [f for f in found if _plausible(f, img.shape)]
+        return _dedupe(np.array(faces, np.float32)) if faces else []
+
     def detect(self, img):
-        """Retorna linhas no formato YuNet (x, y, w, h, 10 pontos, score)."""
+        """
+        Retorna linhas no formato YuNet (x, y, w, h, 10 pontos, score) nas
+        coordenadas da foto original.
+        """
         h, w = img.shape[:2]
         scale = min(1.0, DETECT_MAX_SIDE / float(max(h, w)))
         small = img if scale == 1.0 else cv2.resize(
             img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-        self.detector.setInputSize((small.shape[1], small.shape[0]))
-        _, faces = self.detector.detect(small)
-        if faces is None:
+        sh, sw = small.shape[:2]
+        # Cada foto e testada em 4 rotacoes e fica so a rotacao em que o
+        # detector tem mais certeza (fotos tiradas deitadas / de lado).
+        best, best_score = None, -1.0
+        for rot in ROTATIONS:
+            if rot == 0:
+                im = small
+            else:
+                im = cv2.rotate(small, {90: cv2.ROTATE_90_CLOCKWISE,
+                                        180: cv2.ROTATE_180,
+                                        270: cv2.ROTATE_90_COUNTERCLOCKWISE}[rot])
+            faces = self._detect_multiscale(im)
+            if len(faces) == 0:
+                continue
+            # media dos rostos mais confiaveis: de cabeca para baixo o detector
+            # ainda acerta, mas com um pouco menos de certeza
+            top = sorted((float(f[14]) for f in faces), reverse=True)
+            top = [t for t in top if t >= SURE_FACE][:3] or top[:1]
+            score = sum(top) / len(top) + (0.01 if rot == 0 else 0.0)
+            if score > best_score:
+                best_score = score
+                best = [_unrotate(f, rot, sw, sh) for f in faces]
+        if not best:
             return np.zeros((0, 15), np.float32)
-        faces = faces.copy()
+        faces = np.array(best, np.float32)
         faces[:, :14] /= scale
         return faces
 
     def embed(self, img, face):
         crop = self.recognizer.alignCrop(img, face)
-        feat = self.recognizer.feature(crop).flatten().astype(np.float32)
+        f1 = self.recognizer.feature(crop).flatten()
+        f2 = self.recognizer.feature(cv2.flip(crop, 1)).flatten()   # espelhado
+        feat = (f1 / np.linalg.norm(f1) + f2 / np.linalg.norm(f2)).astype(np.float32)
         return feat / (np.linalg.norm(feat) + 1e-9)
+
+
+def _unrotate(f, rot, w, h):
+    """Converte uma deteccao feita na imagem girada para a imagem original (w x h)."""
+    f = f.copy()
+    pts = f[4:14].reshape(5, 2).copy()
+    x, y, bw, bh = f[:4]
+    corners = np.array([[x, y], [x + bw, y], [x, y + bh], [x + bw, y + bh]], np.float32)
+
+    def back(p):
+        p = p.copy()
+        if rot == 90:        # girada no horario: (x', y') = (h-1-y, x)
+            p[:, 0], p[:, 1] = p[:, 1].copy(), (h - 1) - p[:, 0]
+        elif rot == 270:     # anti-horario: (x', y') = (y, w-1-x)
+            p[:, 0], p[:, 1] = (w - 1) - p[:, 1], p[:, 0].copy()
+        elif rot == 180:
+            p[:, 0], p[:, 1] = (w - 1) - p[:, 0], (h - 1) - p[:, 1]
+        return p
+
+    if rot:
+        pts = back(pts)
+        c = back(corners)
+        x0, y0 = c.min(0)
+        x1, y1 = c.max(0)
+        f[:4] = (x0, y0, x1 - x0, y1 - y0)
+        f[4:14] = pts.flatten()
+    return f
+
+
+def _plausible(f, shape):
+    """Descarta deteccoes falsas (maos, pele, cabelo): olhos, nariz e boca
+    precisam estar dentro da foto e na ordem certa de cima para baixo."""
+    h, w = shape[:2]
+    pts = f[4:14].reshape(5, 2)
+    if (pts[:, 0] < 0).any() or (pts[:, 1] < 0).any() or \
+            (pts[:, 0] >= w).any() or (pts[:, 1] >= h).any():
+        return False
+    reye, leye, nose, rmouth, lmouth = pts
+    eye_y = (reye[1] + leye[1]) / 2
+    mouth_y = (rmouth[1] + lmouth[1]) / 2
+    eye_dist = np.hypot(*(leye - reye))
+    if eye_dist < 0.2 * f[2]:
+        return False
+    return eye_y < nose[1] < mouth_y and reye[0] < leye[0]
+
+
+def _dedupe(faces, iou_max=0.35):
+    """Remove o mesmo rosto achado duas vezes (fica o de maior confianca)."""
+    order = np.argsort(-faces[:, 14])
+    keep = []
+    for i in order:
+        x, y, w, h = faces[i, :4]
+        ok = True
+        for j in keep:
+            X, Y, W, H = faces[j, :4]
+            iw = max(0.0, min(x + w, X + W) - max(x, X))
+            ih = max(0.0, min(y + h, Y + H) - max(y, Y))
+            inter = iw * ih
+            if inter / (w * h + W * H - inter + 1e-9) > iou_max or \
+                    inter / (min(w * h, W * H) + 1e-9) > 0.5:   # um dentro do outro
+                ok = False
+                break
+        if ok:
+            keep.append(i)
+    return faces[keep]
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +327,35 @@ def cluster_faces(embs, photo_ids, threshold=SAME_PERSON):
         size[a] += size[b]
         clusters[a].extend(clusters.pop(b))
 
-    return list(clusters.values())
+    groups = list(clusters.values())
+    return merge_groups(X, groups, ids)
+
+
+def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
+    """
+    Segunda passada: junta grupos cuja media de rostos e muito parecida
+    (a mesma pessoa com careta, de lado, com luz diferente...), desde que
+    os dois grupos nao tenham rostos na mesma foto.
+    """
+    groups = [list(g) for g in groups]
+    while len(groups) > 1:
+        C = np.array([X[g].mean(0) for g in groups])
+        C /= np.linalg.norm(C, axis=1, keepdims=True) + 1e-9
+        S = C @ C.T
+        np.fill_diagonal(S, -np.inf)
+        photos = [set(ids[g].tolist()) for g in groups]
+        merged = False
+        for flat in np.argsort(-S, axis=None):
+            a, b = divmod(int(flat), len(groups))
+            if S[a, b] < threshold:
+                break
+            if a < b and not (photos[a] & photos[b]):
+                groups[a].extend(groups.pop(b))
+                merged = True
+                break
+        if not merged:
+            break
+    return groups
 
 
 def process_folder(src, engine, log=print, progress=lambda done, total: None,
@@ -223,7 +366,7 @@ def process_folder(src, engine, log=print, progress=lambda done, total: None,
     if not images:
         raise RuntimeError("Nenhuma foto encontrada nessa pasta.")
 
-    embs, photo_ids, thumbs = [], [], []
+    embs, photo_ids, scores = [], [], []
     total = len(images)
     for i, path in enumerate(images):
         img = read_image(path)
@@ -241,6 +384,7 @@ def process_folder(src, engine, log=print, progress=lambda done, total: None,
             except cv2.error:
                 continue
             photo_ids.append(i)
+            scores.append(float(f[14]))
             kept += 1
         log("%s: %d rosto(s)" % (os.path.basename(path), kept))
         progress(i + 1, total)
@@ -250,6 +394,10 @@ def process_folder(src, engine, log=print, progress=lambda done, total: None,
 
     log("Agrupando %d rostos..." % len(embs))
     groups = cluster_faces(embs, photo_ids)
+    # grupo formado so por deteccoes duvidosas = provavelmente nao e um rosto
+    groups = [g for g in groups if max(scores[k] for k in g) >= SURE_FACE]
+    if not groups:
+        raise RuntimeError("Nenhum rosto encontrado nas fotos.")
     # cada grupo -> conjunto de fotos; mais fotos primeiro (aluno_1 = quem mais aparece)
     people = [sorted({photo_ids[k] for k in g}) for g in groups]
     people.sort(key=lambda ph: (-len(ph), ph[0]))

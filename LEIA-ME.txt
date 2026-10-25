@@ -36,5 +36,5 @@ OBSERVAÇÕES
 - O Windows pode mostrar "O Windows protegeu o computador" na primeira vez,
   porque o .exe não é assinado. Clique em "Mais informações" > "Executar assim mesmo".
 - Ajuste fino (no início de reconhecimento.py):
-    SAME_PERSON = 0.40  -> aumente (ex.: 0.45) se pessoas diferentes caírem na mesma pasta;
-                           diminua (ex.: 0.35) se a mesma pessoa for dividida em várias pastas.
+    SAME_PERSON = 0.36  -> aumente (ex.: 0.42) se pessoas diferentes caírem na mesma pasta;
+                           diminua (ex.: 0.30) se a mesma pessoa for dividida em várias pastas.
