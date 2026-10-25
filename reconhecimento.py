@@ -30,7 +30,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 8
+VERSAO = 9
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -372,15 +372,18 @@ def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
     return groups
 
 
-def scan_faces(images, engine, log=print, progress=lambda done, total: None):
-    """Detecta e descreve todos os rostos. Retorna (embeddings, foto de cada rosto, confianca)."""
-    embs, photo_ids, scores = [], [], []
+def scan_faces(images, engine, log=print, progress=lambda done, total, text=None: None):
+    """
+    Detecta e descreve todos os rostos. Retorna (embeddings, foto de cada
+    rosto, confianca, caixa x,y,w,h de cada rosto).
+    """
+    embs, photo_ids, scores, boxes = [], [], [], []
     total = len(images)
     for i, path in enumerate(images):
         img = read_image(path)
         if img is None:
             log("Não foi possível abrir: %s" % os.path.basename(path))
-            progress(i + 1, total)
+            progress(i + 1, total, "Analisando fotos...")
             continue
         kept = 0
         for f in engine.detect(img):
@@ -392,51 +395,21 @@ def scan_faces(images, engine, log=print, progress=lambda done, total: None):
                 continue
             photo_ids.append(i)
             scores.append(float(f[14]))
+            boxes.append([float(v) for v in f[:4]])
             kept += 1
         log("%s: %d rosto(s)" % (os.path.basename(path), kept))
-        progress(i + 1, total)
-    return np.array(embs, np.float32).reshape(-1, 128), np.array(photo_ids, int), np.array(scores)
+        progress(i + 1, total, "Analisando fotos...")
+    return (np.array(embs, np.float32).reshape(-1, 128), np.array(photo_ids, int),
+            np.array(scores), np.array(boxes, np.float32).reshape(-1, 4))
 
 
 # ---------------------------------------------------------------------------
-# Cadastro de alunos
+# Alunos (fichas)
 # ---------------------------------------------------------------------------
-
-def load_roster(roster_dir, engine, log=print):
-    """
-    Le a pasta de cadastro. Cada foto vira um aluno com o nome do arquivo
-    (Maria Silva.jpg), ou cada subpasta vira um aluno com todas as fotos dela
-    (Maria Silva/foto1.jpg, foto2.jpg...). Retorna {nome: [embeddings]}.
-    """
-    entries = []
-    for n in sorted(os.listdir(roster_dir), key=natural_key):
-        p = os.path.join(roster_dir, n)
-        if os.path.isdir(p):
-            entries += [(n, f) for f in list_images(p)]
-        elif os.path.splitext(n)[1].lower() in IMAGE_EXTS:
-            entries.append((os.path.splitext(n)[0].strip(), p))
-    roster, missing = {}, []
-    for name, path in entries:
-        img = read_image(path)
-        faces = engine.detect(img) if img is not None else []
-        faces = [f for f in faces if f[14] >= SURE_FACE]
-        if not len(faces):
-            missing.append(os.path.basename(path))
-            continue
-        # a foto de cadastro deve ter so o aluno: fica o maior rosto
-        f = max(faces, key=lambda f: f[2] * f[3])
-        roster.setdefault(name, []).append(engine.embed(img, f))
-    for m in missing:
-        log("Cadastro: nenhum rosto claro em %s (ignorada)" % m)
-    if not roster:
-        raise RuntimeError("Nenhum rosto encontrado nas fotos do cadastro.")
-    log("Cadastro: %d aluno(s)" % len(roster))
-    return {k: np.array(v, np.float32) for k, v in roster.items()}, missing
-
 
 def match_roster(embs, photo_ids, groups, roster):
     """
-    Liga cada grupo de rostos (mesma pessoa) ao aluno cadastrado mais
+    Liga cada grupo de rostos (mesma pessoa) ao aluno da ficha mais
     parecido. A decisao e pela media de todas as fotos do grupo, e nao foto a
     foto: um pai ou irmao parecido pode bater com o aluno numa foto isolada,
     mas nao na media. Grupos que nao parecem com nenhum aluno (pais,
@@ -525,68 +498,76 @@ def read_card(img):
     return name, code, lines
 
 
-def scan_cards(card_dir, engine, log=print, progress=lambda done, total: None):
-    """
-    Para cada foto de ficha: le nome e codigo e guarda o rosto do aluno.
-    Retorna lista de dicts {arquivo, nome, codigo, rosto (miniatura BGR) ou None}.
-    """
-    items = []
-    files = list_images(card_dir)
-    for i, path in enumerate(files):
-        item = {"file": path, "name": "", "code": "", "thumb": None, "lines": []}
-        img = read_image(path)
-        if img is not None:
-            faces = [f for f in engine.detect(img) if f[14] >= SURE_FACE]
-            if faces:
-                f = max(faces, key=lambda f: f[2] * f[3])
-                item["thumb"] = engine.recognizer.alignCrop(img, f)
-            try:
-                item["name"], item["code"], item["lines"] = read_card(img)
-            except Exception as e:  # sem OCR o usuario ainda pode digitar
-                log("Não consegui ler a ficha de %s: %s" % (os.path.basename(path), e))
-        log("%s: %s" % (os.path.basename(path),
-                        folder_name_for(item["name"], item["code"]) if item["name"] or
-                        item["code"] else "nome não lido"))
-        items.append(item)
-        progress(i + 1, len(files))
-    return items
+def card_region(img, box):
+    """Recorte abaixo do rosto, onde o aluno segura a ficha."""
+    h, w = img.shape[:2]
+    x, y, fw, fh = box
+    x0, x1 = int(max(0, x - 2.5 * fw)), int(min(w, x + 3.5 * fw))
+    y0, y1 = int(max(0, y + 0.8 * fh)), int(min(h, y + 7 * fh))
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return None
+    return img[y0:y1, x0:x1]
 
 
-def save_roster_from_cards(items, roster_dir):
-    """Cria a pasta de cadastro: uma copia de cada foto de ficha com o nome do aluno."""
-    os.makedirs(roster_dir, exist_ok=True)
-    used = {}
-    for it in items:
-        base = it["folder"]
-        sub = os.path.join(roster_dir, base)
-        os.makedirs(sub, exist_ok=True)       # subpasta: o mesmo aluno pode ter varias fichas
-        n = used.get(base, 0) + 1
-        used[base] = n
-        ext = os.path.splitext(it["file"])[1]
-        shutil.copy2(it["file"], os.path.join(sub, "ficha_%d%s" % (n, ext)))
-    return roster_dir
+def find_cards(images, photo_ids, scores, boxes, log=print,
+               progress=lambda done, total, text=None: None):
+    """
+    Acha, no meio das fotos da festa, as fotos de ficha: poucas pessoas e,
+    logo abaixo do maior rosto, um texto com nome e codigo. Retorna
+    {foto: (nome da pasta, rosto do aluno)}.
+    """
+    sure = {}
+    for k, ph in enumerate(photo_ids):
+        if scores[k] >= SURE_FACE:
+            sure.setdefault(int(ph), []).append(k)
+    cands = sorted(ph for ph, ks in sure.items() if len(ks) <= 3)
+    cards = {}
+    for n, ph in enumerate(cands):
+        progress(n + 1, len(cands), "Procurando fichas...")
+        ks = sure[ph]
+        k = max(ks, key=lambda k: boxes[k][2] * boxes[k][3])     # o aluno: maior rosto
+        if len(ks) > 1 and sorted(boxes[j][2] * boxes[j][3] for j in ks)[-2] > \
+                0.6 * boxes[k][2] * boxes[k][3]:
+            continue            # dois rostos do mesmo tamanho: foto de grupo, nao ficha
+        img = read_image(images[ph])
+        crop = card_region(img, boxes[k]) if img is not None else None
+        if crop is None:
+            continue
+        try:
+            name, code, _lines = read_card(crop)
+        except Exception as e:
+            log("Leitor de fichas falhou: %s" % e)
+            break
+        if code and len(name.replace(" ", "")) >= 3:
+            cards[ph] = (folder_name_for(name, code), k)
+            log("Ficha: %s -> %s" % (os.path.basename(images[ph]), cards[ph][0]))
+    return cards
 
 
 # ---------------------------------------------------------------------------
 # Processamento
 # ---------------------------------------------------------------------------
 
-def process_folder(src, engine, log=print, progress=lambda done, total: None,
-                   out_root=None, roster_dir=None, report=None):
+def process_folder(src, engine, log=print, progress=lambda done, total, text=None: None,
+                   out_root=None, report=None):
     """
-    Processa uma pasta de fotos e cria festa_N. Sem cadastro, agrupa por
-    pessoa em aluno_1, aluno_2...; com cadastro, cria uma pasta com o nome de
-    cada aluno e ignora quem nao esta cadastrado. Retorna o caminho criado.
+    Processa uma pasta de fotos e cria festa_N. Se no meio das fotos houver
+    fotos de ficha (aluno segurando nome e codigo), cria uma pasta para cada
+    aluno ("maria eduarda_4821") e ignora quem nao tem ficha (pais,
+    convidados). Sem fichas, agrupa por pessoa em aluno_1, aluno_2...
+    Retorna o caminho criado.
     """
     out_root = out_root or data_dir()
     images = list_images(src)
     if not images:
         raise RuntimeError("Nenhuma foto encontrada nessa pasta.")
-    roster = load_roster(roster_dir, engine, log)[0] if roster_dir else None
 
-    embs, photo_ids, scores = scan_faces(images, engine, log, progress)
+    embs, photo_ids, scores, boxes = scan_faces(images, engine, log, progress)
     if not len(embs):
         raise RuntimeError("Nenhum rosto encontrado nas fotos.")
+
+    log("Procurando fotos de ficha...")
+    cards = find_cards(images, photo_ids, scores, boxes, log, progress)
 
     log("Agrupando %d rostos..." % len(embs))
     groups = cluster_faces(embs, photo_ids)
@@ -595,18 +576,27 @@ def process_folder(src, engine, log=print, progress=lambda done, total: None,
     if not groups:
         raise RuntimeError("Nenhum rosto encontrado nas fotos.")
 
-    if roster:
-        log("Procurando os %d aluno(s) cadastrados..." % len(roster))
+    if cards:
+        roster, by_code = {}, {}
+        for ph, (folder, k) in sorted(cards.items()):
+            code = folder.rsplit("_", 1)[-1]
+            folder = by_code.setdefault(code, folder)   # mesma ficha lida 2x: um aluno so
+            roster.setdefault(folder, []).append(embs[k])
+        roster = {n: np.array(v, np.float32) for n, v in roster.items()}
+        log("Separando os %d aluno(s) das fichas..." % len(roster))
         found = match_roster(embs, photo_ids, groups, roster)
-        people = [(n, ph) for n, ph in found.items() if ph]
-        missing = [n for n, ph in found.items() if not ph]
+        # a foto da ficha nao vai para a pasta do aluno
+        people = [(n, [p for p in ph if p not in cards]) for n, ph in found.items()]
+        missing = [n for n, ph in people if not ph]
+        people = [(n, ph) for n, ph in people if ph]
         if report is not None:
-            report["roster"] = len(roster)
+            report["fichas"] = len(roster)
             report["missing"] = missing
         if missing:
-            log("Alunos não encontrados nas fotos: " + ", ".join(missing))
+            log("Alunos sem fotos além da ficha: " + ", ".join(missing))
         if not people:
-            raise RuntimeError("Nenhum aluno do cadastro foi encontrado nessas fotos.")
+            raise RuntimeError("Achei %d ficha(s), mas nenhum desses alunos aparece nas "
+                               "outras fotos." % len(roster))
     else:
         # mais fotos primeiro (aluno_1 = quem mais aparece)
         phs = sorted([sorted({int(photo_ids[k]) for k in g}) for g in groups],
@@ -721,36 +711,6 @@ LOGO_OPACITY = 0.22         # logo de fundo bem suave para nao atrapalhar a leit
 ROW_H = 34
 
 
-def settings_path():
-    return os.path.join(os.path.dirname(data_dir()), "config.json")
-
-
-def load_settings():
-    try:
-        with open(settings_path(), encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def save_settings(cfg):
-    try:
-        with open(settings_path(), "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
-
-
-def count_roster(roster_dir):
-    """Quantos alunos a pasta de cadastro tem (fotos soltas + subpastas)."""
-    try:
-        return sum(1 for n in os.listdir(roster_dir)
-                   if os.path.isdir(os.path.join(roster_dir, n)) or
-                   os.path.splitext(n)[1].lower() in IMAGE_EXTS)
-    except OSError:
-        return 0
-
-
 def validate_new_name(parent, old, new):
     """Retorna mensagem de erro ou None se o novo nome pode ser usado."""
     new = new.strip()
@@ -816,21 +776,15 @@ def run_gui():
     back_btn = make_button(top, "‹  Voltar", None)
     back_btn.configure(fg=YELLOW, activeforeground=YELLOW, disabledforeground="#857000")
     back_btn.pack(side="left", padx=(10, 0))
-    roster_btn = make_button(top, "Cadastro de alunos", None)
-    roster_btn.pack(side="left", padx=(10, 0))
     open_btn = make_button(top, "Abrir no Explorer", None)
     open_btn.pack(side="right")
 
-    cfg = load_settings()
-    if cfg.get("roster_dir") and not os.path.isdir(cfg["roster_dir"]):
-        cfg.pop("roster_dir")
-    roster_bar = tk.Frame(win, bg=BG, padx=12)
-    roster_bar.pack(fill="x", pady=(0, 8))
-    roster_var = tk.StringVar()
-    tk.Label(roster_bar, textvariable=roster_var, bg=BG, fg=FG_DIM,
-             font=("Segoe UI", 10), anchor="w").pack(side="left")
-    roster_clear = tk.Label(roster_bar, text="remover cadastro", bg=BG, fg=ACCENT_HOVER,
-                            font=("Segoe UI", 10, "underline"), cursor="hand2")
+    tip = tk.Label(win, text="Dica: junte às fotos da festa as fotos de cada aluno segurando "
+                   "a ficha. As pastas saem com o nome e o código do aluno.",
+                   bg=BG, fg=FG_DIM, font=("Segoe UI", 10), padx=12, anchor="w",
+                   justify="left")
+    tip.pack(fill="x", pady=(0, 8))
+    tip.bind("<Configure>", lambda e: tip.configure(wraplength=max(200, e.width - 24)))
 
     bar = tk.Frame(win, bg=BG, padx=12)
     bar.pack(fill="x")
@@ -1148,191 +1102,11 @@ def run_gui():
         finally:
             menu.grab_release()
 
-    # --- cadastro de alunos ------------------------------------------------
-    def show_roster():
-        rd = cfg.get("roster_dir")
-        if rd:
-            roster_var.set("Cadastro: pasta \"%s\" com %d aluno(s). Só esses alunos serão "
-                           "separados, com o nome de cada um." % (os.path.basename(rd),
-                                                                   count_roster(rd)))
-            roster_clear.pack(side="left", padx=(10, 0))
-        else:
-            roster_var.set("Sem cadastro: todas as pessoas serão separadas em "
-                           "aluno_1, aluno_2...")
-            roster_clear.pack_forget()
-
-    def roster_menu():
-        if state["busy"]:
-            return
-        m = tk.Menu(win, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT,
-                    activeforeground=FG, bd=0, font=font)
-        m.add_command(label="Fotos das fichas (lê nome e código da ficha)",
-                      command=import_cards)
-        m.add_command(label="Pasta com uma foto de cada aluno, já com o nome",
-                      command=choose_roster)
-        x, y = roster_btn.winfo_rootx(), roster_btn.winfo_rooty() + roster_btn.winfo_height()
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
-
     def busy(on):
         state["busy"] = on
-        for b in (add_btn, roster_btn):
-            b.configure(state="disabled" if on else "normal")
+        add_btn.configure(state="disabled" if on else "normal")
         if on:
             prog["value"] = 0
-
-    def import_cards():
-        d = filedialog.askdirectory(title="Pasta com as fotos dos alunos segurando a ficha")
-        if not d:
-            return
-        if not list_images(d):
-            messagebox.showerror(APP_NAME, "Essa pasta não tem fotos.", parent=win)
-            return
-        busy(True)
-
-        def job():
-            def log(m):
-                msgs.put(("status", m))
-            try:
-                if state["engine"] is None:
-                    log("Carregando modelos de reconhecimento...")
-                    state["engine"] = FaceEngine(log)
-                log("Carregando leitor de texto...")
-                get_ocr()
-                items = scan_cards(d, state["engine"], log,
-                                   lambda a, t: msgs.put(("prog", a, t)))
-                msgs.put(("cards", d, items))
-            except Exception as e:
-                msgs.put(("error", str(e)))
-        threading.Thread(target=job, daemon=True).start()
-
-    def review_cards(card_dir, items):
-        """Janela para conferir/corrigir o nome lido de cada ficha antes de salvar."""
-        top = tk.Toplevel(win, bg=BG)
-        top.title("Conferir fichas")
-        top.geometry("760x620")
-        top.transient(win)
-        top.grab_set()
-        tk.Label(top, text="Confira o nome de cada aluno. Clique no nome para corrigir.",
-                 bg=BG, fg=FG, font=font_b, padx=12, pady=10, anchor="w").pack(fill="x")
-        tk.Label(top, text="Formato: nome_codigo  (ex.: maria eduarda_4821). Desmarque as "
-                 "fotos que não devem entrar.", bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
-                 padx=12, anchor="w").pack(fill="x")
-        body = tk.Frame(top, bg=BG)
-        body.pack(fill="both", expand=True, padx=12, pady=8)
-        cv = tk.Canvas(body, bg=BG, highlightthickness=0)
-        sc = ttk.Scrollbar(body, orient="vertical", command=cv.yview,
-                           style="Dark.Vertical.TScrollbar")
-        inner = tk.Frame(cv, bg=BG)
-        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
-        cv.create_window(0, 0, window=inner, anchor="nw", tags="inner")
-        cv.bind("<Configure>", lambda e: cv.itemconfigure("inner", width=e.width))
-        cv.configure(yscrollcommand=sc.set)
-        cv.pack(side="left", fill="both", expand=True)
-        sc.pack(side="right", fill="y")
-        cv.bind_all("<MouseWheel>", lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
-
-        rows, thumbs = [], []
-        top.thumbs = thumbs     # mantem as miniaturas vivas enquanto a janela existir
-        for it in items:
-            r = tk.Frame(inner, bg=PANEL, padx=8, pady=6)
-            r.pack(fill="x", pady=3)
-            var_on = tk.BooleanVar(value=it["thumb"] is not None)
-            tk.Checkbutton(r, variable=var_on, bg=PANEL, activebackground=PANEL,
-                           selectcolor=BG, fg=FG).pack(side="left")
-            if it["thumb"] is not None:
-                rgb = cv2.cvtColor(cv2.resize(it["thumb"], (64, 64)), cv2.COLOR_BGR2RGB)
-                ph = ImageTk.PhotoImage(Image.fromarray(rgb))
-                thumbs.append(ph)
-                tk.Label(r, image=ph, bg=PANEL).pack(side="left", padx=(0, 10))
-            else:
-                tk.Label(r, text="sem\nrosto", width=8, height=3, bg="#3a1414", fg=FG,
-                         font=("Segoe UI", 9)).pack(side="left", padx=(0, 10))
-            col = tk.Frame(r, bg=PANEL)
-            col.pack(side="left", fill="x", expand=True)
-            var_name = tk.StringVar(value=folder_name_for(it["name"], it["code"])
-                                    if it["name"] or it["code"] else "")
-            e = tk.Entry(col, textvariable=var_name, font=font, bg="#2b2b2b", fg=FG,
-                         insertbackground=FG, relief="flat", highlightthickness=1,
-                         highlightbackground=ACCENT if not var_name.get() else "#333333",
-                         highlightcolor=ACCENT)
-            e.pack(fill="x", ipady=4)
-            info = os.path.basename(it["file"])
-            if it["lines"]:
-                info += "   •   lido: " + " | ".join(it["lines"])[:90]
-            tk.Label(col, text=info, bg=PANEL, fg=FG_DIM, font=("Segoe UI", 9),
-                     anchor="w").pack(fill="x")
-            rows.append((it, var_on, var_name))
-
-        bar2 = tk.Frame(top, bg=BG, padx=12, pady=10)
-        bar2.pack(fill="x")
-
-        def save():
-            chosen = []
-            for it, on, nm in rows:
-                if not on.get():
-                    continue
-                name = nm.get().strip()
-                err = None if name else "Falta o nome de %s." % os.path.basename(it["file"])
-                if name and (any(c in name for c in INVALID_CHARS) or name.endswith(".")):
-                    err = "O nome \"%s\" tem caracteres que o Windows não aceita." % name
-                if err:
-                    messagebox.showerror(APP_NAME, err, parent=top)
-                    return
-                it["folder"] = name
-                chosen.append(it)
-            if not chosen:
-                messagebox.showerror(APP_NAME, "Nenhuma ficha marcada.", parent=top)
-                return
-            base = os.path.join(os.path.dirname(root_dir), "Cadastros")
-            dest = os.path.join(base, next_numbered_name(base, "cadastro"))
-            try:
-                save_roster_from_cards(chosen, dest)
-            except OSError as ex:
-                messagebox.showerror(APP_NAME, "Não foi possível salvar: %s" % ex, parent=top)
-                return
-            cfg["roster_dir"] = dest
-            save_settings(cfg)
-            show_roster()
-            status_var.set("Cadastro salvo com %d aluno(s)." % count_roster(dest))
-            close()
-
-        def close():
-            cv.unbind_all("<MouseWheel>")
-            top.destroy()
-
-        make_button(bar2, "Salvar cadastro", save, primary=True).pack(side="right")
-        make_button(bar2, "Cancelar", close).pack(side="right", padx=(0, 10))
-        top.protocol("WM_DELETE_WINDOW", close)
-
-    def choose_roster():
-        if state["busy"]:
-            return
-        messagebox.showinfo(APP_NAME, "Escolha a pasta de cadastro.\n\n"
-                            "Dentro dela coloque uma foto de cada aluno, com o nome do "
-                            "aluno no arquivo (ex.: Maria Silva.jpg). A foto deve mostrar "
-                            "só o aluno, de frente.\n\nSe tiver mais de uma foto do mesmo "
-                            "aluno, crie uma subpasta com o nome dele e coloque as fotos "
-                            "dentro.", parent=win)
-        d = filedialog.askdirectory(title="Pasta com uma foto de cada aluno",
-                                    initialdir=cfg.get("roster_dir") or None)
-        if not d:
-            return
-        if count_roster(d) == 0:
-            messagebox.showerror(APP_NAME, "Essa pasta não tem fotos de alunos.", parent=win)
-            return
-        cfg["roster_dir"] = d
-        save_settings(cfg)
-        show_roster()
-
-    def clear_roster(_e=None):
-        if state["busy"]:
-            return
-        cfg.pop("roster_dir", None)
-        save_settings(cfg)
-        show_roster()
 
     # --- atualizacao ---------------------------------------------------------
     def update_job():
@@ -1375,8 +1149,8 @@ def run_gui():
                 state["engine"] = FaceEngine(log)
             report = {}
             ev = process_folder(folder, state["engine"], log,
-                                lambda d, t: msgs.put(("prog", d, t)), root_dir,
-                                roster_dir=cfg.get("roster_dir"), report=report)
+                                lambda d, t, txt=None: msgs.put(("prog", d, t, txt)),
+                                root_dir, report=report)
             msgs.put(("done", ev, report))
         except Exception as e:  # mostra qualquer erro ao usuario
             msgs.put(("error", str(e)))
@@ -1399,23 +1173,19 @@ def run_gui():
                 elif m[0] == "prog":
                     prog["maximum"] = m[2]
                     prog["value"] = m[1]
-                    status_var.set("Analisando fotos... %d de %d" % (m[1], m[2]))
+                    status_var.set("%s %d de %d" % (m[3] or "Analisando fotos...", m[1], m[2]))
                 elif m[0] == "update":
                     show_update(m[1])
-                elif m[0] == "cards":
-                    busy(False)
-                    status_var.set("Fichas lidas. Confira os nomes.")
-                    review_cards(m[1], m[2])
                 elif m[0] in ("done", "error"):
                     busy(False)
                     if m[0] == "done":
                         n = len(subdirs(m[1]))
                         rep = m[2]
-                        if "roster" in rep:
-                            text = ("%s criada: %d de %d aluno(s) encontrados."
-                                    % (os.path.basename(m[1]), n, rep["roster"]))
+                        if "fichas" in rep:
+                            text = ("%s criada: %d ficha(s), %d aluno(s) com fotos."
+                                    % (os.path.basename(m[1]), rep["fichas"], n))
                             if rep["missing"]:
-                                text += "\n\nNão apareceram nas fotos:\n" + \
+                                text += "\n\nNão apareceram em outras fotos:\n" + \
                                         "\n".join(rep["missing"][:30])
                         else:
                             text = "%s criada com %d pessoa(s)." % (os.path.basename(m[1]), n)
@@ -1433,9 +1203,6 @@ def run_gui():
         win.after(100, poll)
 
     add_btn.configure(command=add_folder)
-    roster_btn.configure(command=roster_menu)
-    roster_clear.bind("<Button-1>", clear_roster)
-    show_roster()
     back_btn.configure(command=go_back)
     open_btn.configure(command=open_sel)
     canvas.bind("<Configure>", resize_logo)
@@ -1465,8 +1232,7 @@ def run_gui():
 def run_cli(folder):
     """Uso sem interface: reconhecimento.exe C:\\caminho\\fotos"""
     engine = FaceEngine()
-    ev = process_folder(folder, engine,
-                        progress=lambda d, t: None)
+    ev = process_folder(folder, engine)
     print(ev)
 
 

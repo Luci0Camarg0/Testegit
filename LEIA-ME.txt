@@ -18,24 +18,20 @@ O QUE O PROGRAMA FAZ
 - Botão direito numa festa ou num aluno > "Renomear" (ou selecione e aperte F2).
   Digite o novo nome e aperte Enter (Esc cancela). Nomes repetidos não são aceitos.
 
-CADASTRO DE ALUNOS (para separar só os formandos)
-Opção 1 - Fotos das fichas (mais fácil):
-- Clique em "Cadastro de alunos" > "Fotos das fichas" e escolha a pasta com as
-  fotos de cada aluno segurando a ficha de identificação.
-- O programa lê o nome e o código da ficha e guarda o rosto do aluno.
-- Uma janela mostra o rosto e o nome lido (ex.: maria eduarda_4821). Corrija o
-  que estiver errado, desmarque fotos sem aluno e clique em "Salvar cadastro".
-- As pastas da formatura saem com esse nome: maria eduarda_4821.
-
-Opção 2 - Pasta com fotos já nomeadas:
-- Crie uma pasta com UMA foto de cada aluno, só o aluno e de frente, com o nome
-  do aluno no arquivo:   Cadastro\Maria Silva.jpg,  Cadastro\João Souza.jpg ...
-  (com mais de uma foto do mesmo aluno: Cadastro\Maria Silva\foto1.jpg, foto2.jpg)
-- No programa, clique em "Cadastro de alunos" > "Pasta com uma foto de cada aluno". Ela fica salva.
-- Agora, ao adicionar as fotos da formatura, o programa cria uma pasta com o NOME
-  de cada aluno e ignora quem não está no cadastro (pais, convidados).
-- No fim ele avisa quais alunos não apareceram em nenhuma foto.
-- Clique em "remover cadastro" para voltar ao modo automático (aluno_1, aluno_2...).
+ALUNOS PELAS FICHAS (para separar só os formandos)
+- Na mesma pasta das fotos da festa ou da colação, coloque também as fotos de
+  cada aluno segurando a ficha de identificação (nome e código). Podem estar
+  misturadas com as outras ou em subpastas.
+- Clique em "+ Adicionar pasta de fotos". O programa acha sozinho as fotos de
+  ficha, lê o nome e o código e cria uma pasta para cada aluno:
+      Eventos\festa_1\maria eduarda_4821
+- Cada pasta recebe as fotos em que aquele aluno aparece. Quem não tem ficha
+  (pais, convidados) é ignorado. A foto da ficha não vai para a pasta.
+- No fim ele avisa quais alunos com ficha não apareceram em outras fotos.
+- A foto da ficha deve mostrar só o aluno, de frente, com a ficha abaixo do
+  rosto. Se o nome sair errado, clique com o botão direito na pasta > Renomear.
+- Sem nenhuma foto de ficha na pasta, o programa separa todas as pessoas em
+  aluno_1, aluno_2... como antes.
 
 ATUALIZAÇÃO AUTOMÁTICA
 - Ao abrir, o programa confere na internet se há versão nova. Se houver, baixa
