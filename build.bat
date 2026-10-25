@@ -39,6 +39,8 @@ echo [4/4] Gerando o .exe (pode levar alguns minutos)...
 pyinstaller --noconfirm --clean --onefile --windowed ^
     --name ReconhecimentoFacial ^
     --add-data "models;models" ^
+    --add-data "assets;assets" ^
+    --icon "assets\icone.ico" ^
     reconhecimento.py || goto :erro
 
 echo.

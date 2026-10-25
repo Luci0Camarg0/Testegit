@@ -15,6 +15,8 @@ O QUE O PROGRAMA FAZ
     * na tela "Eventos" ela procura as festas E as pastas aluno_X dentro delas;
     * dentro de uma festa ela procura só as pastas aluno_X daquela festa.
 - Dois cliques numa festa abre a festa. Dois cliques num aluno abre a pasta no Explorer.
+- Botão direito numa festa ou num aluno > "Renomear" (ou selecione e aperte F2).
+  Digite o novo nome e aperte Enter (Esc cancela). Nomes repetidos não são aceitos.
 
 COMO GERAR O .EXE (uma vez só)
 Opção A - no seu computador Windows:

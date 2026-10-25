@@ -25,7 +25,7 @@ jobs:
           Invoke-WebRequest https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx -OutFile models/face_recognition_sface_2021dec.onnx
 
       - name: Gerar exe
-        run: pyinstaller --noconfirm --onefile --windowed --name ReconhecimentoFacial --add-data "models;models" reconhecimento.py
+        run: pyinstaller --noconfirm --onefile --windowed --name ReconhecimentoFacial --add-data "models;models" --add-data "assets;assets" --icon assets/icone.ico reconhecimento.py
 
       - name: Testar se o exe abre os modelos
         shell: pwsh

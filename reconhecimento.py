@@ -425,71 +425,155 @@ def process_folder(src, engine, log=print, progress=lambda done, total: None,
 # Interface
 # ---------------------------------------------------------------------------
 
+INVALID_CHARS = '\\/:*?"<>|'
+
+# Cores do tema escuro
+BG = "#121212"
+PANEL = "#1c1c1c"
+ROW_HOVER = "#262626"
+ROW_SEL = "#7a1c1c"
+ACCENT = "#c62828"
+ACCENT_HOVER = "#e53935"
+FG = "#ffffff"
+FG_DIM = "#b0b0b0"
+LOGO_OPACITY = 0.22         # logo de fundo bem suave para nao atrapalhar a leitura
+ROW_H = 34
+
+
+def validate_new_name(parent, old, new):
+    """Retorna mensagem de erro ou None se o novo nome pode ser usado."""
+    new = new.strip()
+    if not new:
+        return "O nome não pode ficar vazio."
+    if any(c in new for c in INVALID_CHARS):
+        return "O nome não pode ter estes caracteres:  %s" % " ".join(INVALID_CHARS)
+    if new.endswith(".") or new.endswith(" "):
+        return "O nome não pode terminar com ponto ou espaço."
+    if new.lower() != old.lower():
+        for n in os.listdir(parent):
+            if n.lower() == new.lower():
+                return "Já existe uma pasta chamada \"%s\" aqui." % n
+    return None
+
+
 def run_gui():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
+    from PIL import Image, ImageTk
 
     root_dir = data_dir()
-    state = {"current": None, "engine": None, "busy": False}
+    state = {"current": None, "engine": None, "busy": False,
+             "rows": [], "sel": None, "hover": None, "editor": None}
     msgs = queue.Queue()
 
     win = tk.Tk()
     win.title(APP_NAME)
-    win.geometry("760x560")
+    win.geometry("820x600")
     win.minsize(560, 420)
+    win.configure(bg=BG)
     try:
-        win.iconbitmap(os.path.join(resource_dir(), "icone.ico"))
+        win.iconbitmap(os.path.join(resource_dir(), "assets", "icone.ico"))
     except Exception:
         pass
 
+    font = ("Segoe UI", 11)
+    font_b = ("Segoe UI", 11, "bold")
     style = ttk.Style()
-    try:
-        style.theme_use("vista" if sys.platform.startswith("win") else "clam")
-    except tk.TclError:
-        pass
-    style.configure("Big.TButton", padding=(14, 8), font=("Segoe UI", 11, "bold"))
+    style.theme_use("clam")
+    style.configure("Dark.Horizontal.TProgressbar", troughcolor=PANEL,
+                    background=ACCENT, bordercolor=PANEL, lightcolor=ACCENT, darkcolor=ACCENT)
+    style.configure("Dark.Vertical.TScrollbar", background=PANEL, troughcolor=BG,
+                    bordercolor=BG, arrowcolor=FG_DIM, lightcolor=PANEL, darkcolor=PANEL)
+    style.map("Dark.Vertical.TScrollbar", background=[("active", ROW_HOVER)])
+
+    def make_button(parent, text, cmd, primary=False):
+        base = ACCENT if primary else PANEL
+        hover = ACCENT_HOVER if primary else ROW_HOVER
+        b = tk.Button(parent, text=text, command=cmd, bg=base, fg=FG,
+                      activebackground=hover, activeforeground=FG,
+                      disabledforeground="#666666", relief="flat", bd=0,
+                      font=font_b if primary else font, padx=16, pady=8, cursor="hand2")
+        b.bind("<Enter>", lambda e: b.configure(bg=hover) if b["state"] == "normal" else None)
+        b.bind("<Leave>", lambda e: b.configure(bg=base))
+        return b
 
     # --- topo ---------------------------------------------------------------
-    top = ttk.Frame(win, padding=10)
+    top = tk.Frame(win, bg=BG, padx=12, pady=12)
     top.pack(fill="x")
-    add_btn = ttk.Button(top, text="+ Adicionar pasta de fotos", style="Big.TButton")
+    add_btn = make_button(top, "+  Adicionar pasta de fotos", None, primary=True)
     add_btn.pack(side="left")
-    back_btn = ttk.Button(top, text="< Voltar")
+    back_btn = make_button(top, "‹  Voltar", None)
     back_btn.pack(side="left", padx=(10, 0))
-    open_btn = ttk.Button(top, text="Abrir no Explorer")
+    open_btn = make_button(top, "Abrir no Explorer", None)
     open_btn.pack(side="right")
 
-    bar = ttk.Frame(win, padding=(10, 0, 10, 6))
+    bar = tk.Frame(win, bg=BG, padx=12)
     bar.pack(fill="x")
-    ttk.Label(bar, text="Pesquisar:").pack(side="left")
+    tk.Label(bar, text="Pesquisar:", bg=BG, fg=FG, font=font).pack(side="left")
     search_var = tk.StringVar()
-    search = ttk.Entry(bar, textvariable=search_var, font=("Segoe UI", 11))
-    search.pack(side="left", fill="x", expand=True, padx=(6, 0))
+    search = tk.Entry(bar, textvariable=search_var, font=font, bg=PANEL, fg=FG,
+                      insertbackground=FG, relief="flat", highlightthickness=1,
+                      highlightbackground="#333333", highlightcolor=ACCENT)
+    search.pack(side="left", fill="x", expand=True, padx=(8, 0), ipady=6)
     where_var = tk.StringVar()
-    ttk.Label(win, textvariable=where_var, padding=(10, 0),
-              font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    tk.Label(win, textvariable=where_var, bg=BG, fg=FG, font=("Segoe UI", 12, "bold"),
+             padx=12, pady=8, anchor="w").pack(fill="x")
 
-    # --- lista --------------------------------------------------------------
-    mid = ttk.Frame(win, padding=10)
+    # --- lista (canvas com a logo no fundo) ---------------------------------
+    mid = tk.Frame(win, bg=BG, padx=12)
     mid.pack(fill="both", expand=True)
-    tree = ttk.Treeview(mid, columns=("info",), show="tree headings", selectmode="browse")
-    tree.heading("#0", text="Pasta")
-    tree.heading("info", text="Conteúdo")
-    tree.column("#0", width=380)
-    tree.column("info", width=200, anchor="w")
-    sb = ttk.Scrollbar(mid, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=sb.set)
-    tree.pack(side="left", fill="both", expand=True)
+    canvas = tk.Canvas(mid, bg=BG, highlightthickness=1, highlightbackground="#2a2a2a", bd=0,
+                       yscrollincrement=ROW_H)
+    sb = ttk.Scrollbar(mid, orient="vertical", command=canvas.yview,
+                       style="Dark.Vertical.TScrollbar")
+    canvas.configure(yscrollcommand=lambda a, b: (sb.set(a, b), place_logo()))
+    canvas.pack(side="left", fill="both", expand=True)
     sb.pack(side="right", fill="y")
 
     # --- rodape -------------------------------------------------------------
-    bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
+    bottom = tk.Frame(win, bg=BG, padx=12, pady=10)
     bottom.pack(fill="x")
-    prog = ttk.Progressbar(bottom, mode="determinate")
+    prog = ttk.Progressbar(bottom, mode="determinate", style="Dark.Horizontal.TProgressbar")
     prog.pack(fill="x")
-    status_var = tk.StringVar(value="Pronto. Clique em 'Adicionar pasta de fotos'.")
-    ttk.Label(bottom, textvariable=status_var).pack(anchor="w", pady=(4, 0))
+    status_var = tk.StringVar(value="Pronto. Clique em 'Adicionar pasta de fotos'.  "
+                                    "Botão direito numa pasta para renomear.")
+    tk.Label(bottom, textvariable=status_var, bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
+             anchor="w").pack(fill="x", pady=(6, 0))
 
+    # --- logo ---------------------------------------------------------------
+    logo_src = None
+    try:
+        logo_src = Image.open(os.path.join(resource_dir(), "assets", "logo.png")).convert("RGBA")
+        r, g, b, a = logo_src.split()
+        a = a.point(lambda v: int(v * LOGO_OPACITY))
+        logo_src = Image.merge("RGBA", (r, g, b, a))
+    except Exception:
+        logo_src = None
+    logo = {"img": None, "size": None}
+
+    def place_logo():
+        if logo["img"] is None:
+            return
+        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+        canvas.coords("logo", canvas.canvasx(cw / 2), canvas.canvasy(ch / 2))
+        canvas.tag_lower("logo")
+
+    def resize_logo(_e=None):
+        if logo_src is None:
+            return
+        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+        if cw < 50 or ch < 50:
+            return
+        k = min(cw * 0.7 / logo_src.width, ch * 0.7 / logo_src.height)
+        size = (max(1, int(logo_src.width * k)), max(1, int(logo_src.height * k)))
+        if size != logo["size"]:
+            logo["size"] = size
+            logo["img"] = ImageTk.PhotoImage(logo_src.resize(size, Image.LANCZOS))
+            canvas.delete("logo")
+            canvas.create_image(0, 0, image=logo["img"], tags="logo")
+        draw_rows()
+
+    # --- dados --------------------------------------------------------------
     def subdirs(path):
         try:
             return sorted([n for n in os.listdir(path)
@@ -509,55 +593,233 @@ def run_gui():
         return sorted(names, key=lambda n: (n.lower() != q, natural_key(n)))
 
     def refresh(*_):
+        cancel_edit()
         q = search_var.get().strip().lower()
-        tree.delete(*tree.get_children())
+        rows = []   # (caminho, texto, info, icone)
         cur = state["current"]
         if cur is None:
             where_var.set("Eventos")
-            back_btn.state(["disabled"])
+            back_btn.configure(state="disabled")
             for ev in ordered(subdirs(root_dir), q):
                 ev_path = os.path.join(root_dir, ev)
                 alunos = ordered(subdirs(ev_path), q)
                 if not q or q in ev.lower():
-                    tree.insert("", "end", iid=ev_path, text="\U0001F4C1 " + ev,
-                                values=("%d pessoa(s)" % len(alunos),))
+                    rows.append((ev_path, ev, "%d pessoa(s)" % len(alunos), "festa"))
                 if q:   # fora do evento a pesquisa tambem acha as subpastas
                     for a in alunos:
                         if q in a.lower() or q in ("%s/%s" % (ev, a)).lower():
                             p = os.path.join(ev_path, a)
-                            tree.insert("", "end", iid=p, text="     %s / %s" % (ev, a),
-                                        values=("%d foto(s)" % count_files(p),))
+                            rows.append((p, "%s / %s" % (ev, a),
+                                         "%d foto(s)" % count_files(p), "pessoa"))
         else:
-            where_var.set("Eventos > " + os.path.basename(cur))
-            back_btn.state(["!disabled"])
+            where_var.set("Eventos  ›  " + os.path.basename(cur))
+            back_btn.configure(state="normal")
             for a in ordered(subdirs(cur), q):
-                if not q or q in a.lower():
-                    p = os.path.join(cur, a)
-                    tree.insert("", "end", iid=p, text="\U0001F464 " + a,
-                                values=("%d foto(s)" % count_files(p),))
+                p = os.path.join(cur, a)
+                rows.append((p, a, "%d foto(s)" % count_files(p), "pessoa"))
+        state["rows"] = rows
+        if state["sel"] not in [r[0] for r in rows]:
+            state["sel"] = None
+        state["hover"] = None
+        draw_rows()
 
+    def draw_rows():
+        canvas.delete("row")
+        cw = max(canvas.winfo_width(), 200)
+        col2 = int(cw * 0.66)
+        canvas.create_text(16, ROW_H / 2, text="Pasta", anchor="w", fill=FG_DIM,
+                           font=font_b, tags="row")
+        canvas.create_text(col2, ROW_H / 2, text="Conteúdo", anchor="w", fill=FG_DIM,
+                           font=font_b, tags="row")
+        canvas.create_line(8, ROW_H, cw - 8, ROW_H, fill="#333333", tags="row")
+        for i, (path, text, info, kind) in enumerate(state["rows"]):
+            y = ROW_H * (i + 1) + 2
+            if path == state["sel"]:
+                canvas.create_rectangle(4, y, cw - 4, y + ROW_H - 2, fill=ROW_SEL,
+                                        outline="", tags="row")
+            elif i == state["hover"]:
+                canvas.create_rectangle(4, y, cw - 4, y + ROW_H - 2, fill="",
+                                        outline="#444444", tags="row")
+            draw_icon(18, y + ROW_H / 2 - 1, kind)
+            canvas.create_text(42, y + ROW_H / 2 - 1, text=text, anchor="w", fill=FG,
+                               font=font, tags="row")
+            canvas.create_text(col2, y + ROW_H / 2 - 1, text=info, anchor="w", fill=FG,
+                               font=font, tags="row")
+        if not state["rows"]:
+            msg = ("Nenhuma pasta encontrada." if search_var.get().strip() else
+                   "Nenhum evento ainda. Clique em 'Adicionar pasta de fotos'."
+                   if state["current"] is None else "Este evento está vazio.")
+            canvas.create_text(16, ROW_H * 1.6, text=msg, anchor="w", fill=FG_DIM,
+                               font=font, tags="row")
+        total_h = ROW_H * (len(state["rows"]) + 1) + 8
+        canvas.configure(scrollregion=(0, 0, cw, max(total_h, canvas.winfo_height())))
+        place_logo()
+
+    def draw_icon(x, y, kind):
+        # icones desenhados (emoji nao aparece direito em todo Windows)
+        if kind == "festa":
+            canvas.create_polygon(x - 9, y - 6, x - 3, y - 6, x - 1, y - 4, x + 9, y - 4,
+                                  x + 9, y + 7, x - 9, y + 7, fill=ACCENT, outline="",
+                                  tags="row")
+        else:
+            canvas.create_oval(x - 4, y - 8, x + 4, y, fill=FG, outline="", tags="row")
+            canvas.create_arc(x - 8, y + 1, x + 8, y + 15, start=0, extent=180,
+                              fill=FG, outline="", tags="row")
+
+    def row_at(event):
+        i = int(canvas.canvasy(event.y) // ROW_H) - 1
+        return i if 0 <= i < len(state["rows"]) else None
+
+    # --- acoes --------------------------------------------------------------
     def enter(path):
         if os.path.dirname(path) == root_dir:
             state["current"] = path
+            state["sel"] = None
             search_var.set("")
+            canvas.yview_moveto(0)
             refresh()
         else:
             open_in_explorer(path)
 
-    def on_double(_e):
-        sel = tree.focus()
-        if sel:
-            enter(sel)
+    def on_click(e):
+        cancel_edit()
+        i = row_at(e)
+        state["sel"] = state["rows"][i][0] if i is not None else None
+        draw_rows()
+        canvas.focus_set()
+
+    def on_double(e):
+        i = row_at(e)
+        if i is not None:
+            enter(state["rows"][i][0])
+
+    def on_motion(e):
+        i = row_at(e)
+        if i != state["hover"]:
+            state["hover"] = i
+            draw_rows()
+
+    def on_leave(_e):
+        if state["hover"] is not None:
+            state["hover"] = None
+            draw_rows()
+
+    def on_wheel(e):
+        if canvas.yview() != (0.0, 1.0):
+            canvas.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+
+    def move_sel(step):
+        paths = [r[0] for r in state["rows"]]
+        if not paths:
+            return
+        i = paths.index(state["sel"]) + step if state["sel"] in paths else 0
+        state["sel"] = paths[max(0, min(len(paths) - 1, i))]
+        draw_rows()
 
     def go_back():
+        if state["current"] is None:
+            return
+        state["sel"] = state["current"]
         state["current"] = None
         search_var.set("")
         refresh()
 
     def open_sel():
-        sel = tree.focus()
-        open_in_explorer(sel or state["current"] or root_dir)
+        open_in_explorer(state["sel"] or state["current"] or root_dir)
 
+    # --- renomear -----------------------------------------------------------
+    def cancel_edit(*_):
+        ed = state.get("editor")
+        if ed is not None:
+            state["editor"] = None
+            ed.destroy()
+
+    def start_rename(path=None):
+        path = path or state["sel"]
+        if not path or state["busy"]:
+            return
+        paths = [r[0] for r in state["rows"]]
+        if path not in paths:
+            return
+        cancel_edit()
+        i = paths.index(path)
+        old = os.path.basename(path)
+        canvas.update_idletasks()
+        y = ROW_H * (i + 1) + 2
+        cw = canvas.winfo_width()
+        ed = tk.Entry(canvas, font=font, bg="#2b2b2b", fg=FG, insertbackground=FG,
+                      relief="flat", highlightthickness=1, highlightcolor=ACCENT,
+                      highlightbackground=ACCENT)
+        ed.busy = False
+        ed.insert(0, old)
+        ed.select_range(0, "end")
+        canvas.create_window(38, y + 2, window=ed, anchor="nw",
+                             width=int(cw * 0.66) - 54, height=ROW_H - 6, tags="row")
+        state["editor"] = ed
+        ed.focus_set()
+
+        def confirm(_e=None):
+            if state.get("editor") is not ed or ed.busy:
+                return
+            new = ed.get().strip()
+            if new == old:
+                cancel_edit()
+                return
+            parent = os.path.dirname(path)
+            err = validate_new_name(parent, old, new)
+            if err:
+                ed.busy = True      # evita confirmar de novo enquanto o aviso esta aberto
+                messagebox.showerror(APP_NAME, err, parent=win)
+                ed.busy = False
+                ed.focus_set()
+                return
+            new_path = os.path.join(parent, new)
+            try:
+                os.rename(path, new_path)
+            except OSError as ex:
+                ed.busy = True
+                messagebox.showerror(APP_NAME, "Não foi possível renomear:\n%s\n\n"
+                                     "Feche as janelas ou fotos abertas dessa pasta e "
+                                     "tente de novo." % ex, parent=win)
+                ed.busy = False
+                ed.focus_set()
+                return
+            if state["current"] == path:
+                state["current"] = new_path
+            state["sel"] = new_path
+            status_var.set("\"%s\" renomeada para \"%s\"." % (old, new))
+            cancel_edit()
+            refresh()
+
+        ed.bind("<Return>", confirm)
+        ed.bind("<KP_Enter>", confirm)
+        ed.bind("<Escape>", cancel_edit)
+        ed.bind("<FocusOut>", confirm)
+
+    menu = tk.Menu(win, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT,
+                   activeforeground=FG, bd=0, font=font)
+
+    def on_right(e):
+        cancel_edit()
+        i = row_at(e)
+        if i is None:
+            return
+        path = state["rows"][i][0]
+        state["sel"] = path
+        draw_rows()
+        menu.delete(0, "end")
+        is_event = os.path.dirname(path) == root_dir
+        menu.add_command(label="Abrir" if is_event else "Abrir pasta",
+                         command=lambda: enter(path))
+        menu.add_command(label="Abrir no Explorer", command=lambda: open_in_explorer(path))
+        menu.add_separator()
+        menu.add_command(label="Renomear        F2", command=lambda: start_rename(path))
+        try:
+            menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            menu.grab_release()
+
+    # --- processamento ------------------------------------------------------
     def worker(folder):
         def log(m):
             msgs.put(("status", m))
@@ -578,7 +840,7 @@ def run_gui():
         if not folder:
             return
         state["busy"] = True
-        add_btn.state(["disabled"])
+        add_btn.configure(state="disabled", bg=ACCENT)
         prog["value"] = 0
         threading.Thread(target=worker, args=(folder,), daemon=True).start()
 
@@ -594,12 +856,13 @@ def run_gui():
                     status_var.set("Analisando fotos... %d de %d" % (m[1], m[2]))
                 elif m[0] in ("done", "error"):
                     state["busy"] = False
-                    add_btn.state(["!disabled"])
+                    add_btn.configure(state="normal")
                     if m[0] == "done":
                         n = len(subdirs(m[1]))
                         status_var.set("Pronto! %s criada com %d pessoa(s)."
                                        % (os.path.basename(m[1]), n))
                         state["current"] = m[1]
+                        state["sel"] = None
                         search_var.set("")
                         refresh()
                         messagebox.showinfo(APP_NAME, "%s criada com %d pessoa(s)."
@@ -614,9 +877,21 @@ def run_gui():
     add_btn.configure(command=add_folder)
     back_btn.configure(command=go_back)
     open_btn.configure(command=open_sel)
-    tree.bind("<Double-1>", on_double)
-    tree.bind("<Return>", on_double)
-    win.bind("<BackSpace>", lambda e: go_back() if win.focus_get() is not search else None)
+    canvas.bind("<Configure>", resize_logo)
+    canvas.bind("<Button-1>", on_click)
+    canvas.bind("<Double-1>", on_double)
+    canvas.bind("<Button-3>", on_right)
+    canvas.bind("<Motion>", on_motion)
+    canvas.bind("<Leave>", on_leave)
+    canvas.bind("<MouseWheel>", on_wheel)
+    canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+    canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+    canvas.bind("<Up>", lambda e: move_sel(-1))
+    canvas.bind("<Down>", lambda e: move_sel(1))
+    canvas.bind("<Return>", lambda e: state["sel"] and enter(state["sel"]))
+    canvas.bind("<BackSpace>", lambda e: go_back())
+    win.bind("<F2>", lambda e: start_rename())
+    search.bind("<Down>", lambda e: (canvas.focus_set(), move_sel(1)))
     search_var.trace_add("write", refresh)
 
     refresh()
