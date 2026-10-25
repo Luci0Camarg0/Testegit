@@ -1,0 +1,21 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://scripts/world/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/world/terrain_generator.gd" id="2_terreno"]
+[ext_resource type="PackedScene" path="res://scenes/player/player.tscn" id="3_jogador"]
+[ext_resource type="Script" path="res://scripts/world/vegetation.gd" id="4_vegetacao"]
+[ext_resource type="Script" path="res://scripts/world/day_night_cycle.gd" id="5_dianoite"]
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+
+[node name="Terrain" type="StaticBody3D" parent="."]
+script = ExtResource("2_terreno")
+
+[node name="Vegetation" type="Node3D" parent="."]
+script = ExtResource("4_vegetacao")
+
+[node name="DiaNoite" type="Node3D" parent="."]
+script = ExtResource("5_dianoite")
+
+[node name="Player" parent="." instance=ExtResource("3_jogador")]
