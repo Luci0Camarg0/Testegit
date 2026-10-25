@@ -50,6 +50,20 @@ jobs:
           if (-not $r.StartsWith("ok")) { exit 1 }
           Remove-Item dist/autoteste.txt
 
+      - name: Testar o reiniciar depois de atualizar
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist/ReconhecimentoFacial.exe -ArgumentList "--autoteste-reinicio" -PassThru
+          $null = $p.WaitForExit(60000)
+          for ($i = 0; $i -lt 90 -and -not (Test-Path dist/autoteste.txt); $i++) { Start-Sleep 1 }
+          Start-Sleep 2
+          if (-not (Test-Path dist/autoteste.txt)) { Write-Error "o programa nao reabriu"; exit 1 }
+          $r = Get-Content dist/autoteste.txt
+          Write-Output $r
+          if (-not $r.StartsWith("ok")) { exit 1 }
+          Remove-Item dist/autoteste.txt
+
       - uses: actions/upload-artifact@v4
         with:
           name: ReconhecimentoFacial

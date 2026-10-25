@@ -30,7 +30,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 7
+VERSAO = 8
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -686,9 +686,19 @@ def check_update():
     return ("codigo", remote)
 
 
-def restart_program():
-    subprocess.Popen([sys.executable] + ([] if getattr(sys, "frozen", False)
-                                         else [os.path.abspath(sys.argv[0])]))
+def restart_program(args=()):
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable]
+        # sem isso o .exe novo usa a pasta temporaria deste, que e apagada
+        # quando este fecha, e abre com erro (traceback)
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        for k in ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE",
+                  "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC"):
+            env.pop(k, None)
+    else:
+        cmd = [sys.executable, os.path.abspath(sys.argv[0])]
+    subprocess.Popen(cmd + list(args), env=env)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,6 +1489,8 @@ def self_test():
 def main(argv):
     if argv and argv[0] == "--autoteste":
         self_test()
+    elif argv and argv[0] == "--autoteste-reinicio":
+        restart_program(["--autoteste"])    # usado no build: testa o reiniciar
     elif argv and os.path.isdir(argv[0]):
         run_cli(argv[0])
     else:
