@@ -32,7 +32,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 14
+VERSAO = 15
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -60,6 +60,8 @@ MERGE_GROUPS = 0.42         # similaridade entre medias para juntar grupos da me
 SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ignorada (maos, pele...)
 MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pessoa e o aluno
 LEFTOVER_FOLDER = "sem_aluno"   # fotos que nao foram para nenhum aluno
+NO_ID_FOLDER = "aluno_sem_id%d"  # aluno sem ficha legivel: separado so pelo rosto
+SAME_CARD_FACE = 0.65       # duas fichas com o mesmo numero: so junta se for o mesmo rosto
 SEQ_MATCH = 0.30            # foto logo depois da ficha: basta isso para ser do mesmo aluno
 SEQ_SLACK = 0.05            # ...desde que nao pareca mais com outro aluno
 FREE_MATCH = 0.40           # foto fora da sequencia da ficha: precisa parecer mais
@@ -433,7 +435,10 @@ def group_cards(embs, cards):
     for ph, (name, code, k) in sorted(cards.items()):
         g = None
         for cand in groups:
-            if code and code in cand["codes"]:
+            # mesmo numero e mesmo rosto = mesma ficha fotografada de novo. Mesmo
+            # numero com outro rosto = numero lido errado: fica separado
+            if code and code in cand["codes"] and \
+                    float(np.max(X[cand["faces"]] @ X[k])) >= SAME_CARD_FACE:
                 g = cand
         last = groups[-1] if groups else None
         if g is None and last and ph - last["photos"][-1] <= 2 and \
@@ -449,12 +454,16 @@ def group_cards(embs, cards):
             g["codes"].append(code)
         if name:
             g["names"].append(name)
-    out, used = [], set()
+    out, used, no_id = [], set(), 0
     for g in groups:
         code = max(sorted(set(g["codes"])), key=lambda c: (g["codes"].count(c), len(c))) \
             if g["codes"] else ""
         name = max(g["names"], key=_name_quality) if g["names"] else ""
-        folder = base = folder_name_for(name, code)
+        if name or code:
+            folder = base = folder_name_for(name, code)
+        else:
+            no_id += 1
+            folder = base = NO_ID_FOLDER % no_id
         n = 2
         while folder in used:           # mesmo nome lido em fichas diferentes
             folder = "%s_%d" % (base, n)
@@ -1025,10 +1034,11 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
         # na ficha da Gala Eventos, sem numero legivel a pasta fica so com o
         # nome, e sem nome legivel fica so com o numero
         if gala and not code and (len(name.split()) < 2 or len(name.replace(" ", "")) < 6):
-            # e a ficha da Gala, mas nao deu para ler: a pasta leva o nome da foto
-            # para o aluno nao ir para sem_aluno
-            name = "aluno " + os.path.splitext(os.path.basename(images[ph]))[0]
-        if (code and (gala or len(name.replace(" ", "")) >= 3)) or \
+            # e a ficha da Gala, mas nao deu para ler: vira aluno_sem_idN e as
+            # fotos vao pelo rosto, para o aluno nao ir para sem_aluno
+            cards[ph] = ("", "", k)
+            log("Ficha: %s -> não deu para ler" % os.path.basename(images[ph]))
+        elif (code and (gala or len(name.replace(" ", "")) >= 3)) or \
                 (gala and len(name.split()) >= 2 and len(name.replace(" ", "")) >= 6):
             cards[ph] = (name, code, k)
             log("Ficha: %s -> %s" % (os.path.basename(images[ph]), folder_name_for(name, code)))
@@ -1086,6 +1096,27 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
     # perdem: vao para uma pasta separada
     placed = {p for _, ph in people for p in ph}
     rest = [p for p in range(len(images)) if p not in placed]
+    if cards and rest:
+        # quem sobrou e aparece em 2 fotos ou mais com o mesmo rosto ganha uma
+        # pasta aluno_sem_idN (sem ficha legivel); o resto vai para sem_aluno
+        ks = [k for k in range(len(embs))
+              if int(photo_ids[k]) in set(rest) and scores[k] >= SURE_FACE]
+        if ks:
+            sub = cluster_faces(embs[ks], photo_ids[ks], threshold=0.45)
+            phs = sorted([sorted({int(photo_ids[ks[j]]) for j in grp}) for grp in sub],
+                         key=lambda ph: ph[0])
+            used = {f for f, _ in people}
+            n = 1
+            for ph in phs:
+                if len(ph) < 2:
+                    continue
+                while NO_ID_FOLDER % n in used:
+                    n += 1
+                people.append((NO_ID_FOLDER % n, ph))
+                used.add(NO_ID_FOLDER % n)
+                log("Sem ficha, separado pelo rosto: %s (%d fotos)" % (NO_ID_FOLDER % n, len(ph)))
+            placed = {p for _, ph in people for p in ph}
+            rest = [p for p in range(len(images)) if p not in placed]
     if rest:
         people.append((LEFTOVER_FOLDER, rest))
 

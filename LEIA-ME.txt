@@ -59,7 +59,10 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
   campos (nome dos pais, e-mail) e com nomes comuns. Se o número não der
   para ler, a pasta sai só com o nome (alicia_ferreira_guimaraes). Se o nome
   não der para ler, sai só com o número (aluno_2372). Se nada der para ler, a
-  pasta leva o nome da foto da ficha (aluno_2t1a9968), mas o aluno não se perde.
+  pasta sai como aluno_sem_id1, aluno_sem_id2... e as fotos vão pelo rosto.
+- Duas fichas com o mesmo número só viram uma pasta se o rosto for o mesmo.
+- Quem não tem ficha mas aparece em 2 fotos ou mais com o mesmo rosto também
+  ganha uma pasta aluno_sem_idN. Quem aparece numa foto só vai para sem_aluno.
 - A foto da ficha deve mostrar só o aluno, de frente, com a ficha abaixo do
   rosto. Se o nome sair errado, clique com o botão direito na pasta > Renomear.
 - Na primeira vez, quem tem o .exe antigo baixa o leitor de letra de mão
