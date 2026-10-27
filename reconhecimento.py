@@ -30,7 +30,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 10
+VERSAO = 11
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -57,6 +57,10 @@ SAME_PERSON = 0.36          # similaridade (cosseno) para juntar rostos
 MERGE_GROUPS = 0.42         # similaridade entre medias para juntar grupos da mesma pessoa
 SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ignorada (maos, pele...)
 MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pessoa e o aluno
+SEQ_MATCH = 0.30            # foto logo depois da ficha: basta isso para ser do mesmo aluno
+SEQ_SLACK = 0.05            # ...desde que nao pareca mais com outro aluno
+FREE_MATCH = 0.40           # foto fora da sequencia da ficha: precisa parecer mais
+FREE_MARGIN = 0.04          # ...e mais que com o segundo aluno mais parecido
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +353,9 @@ def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
     """
     Segunda passada: junta grupos cuja media de rostos e muito parecida
     (a mesma pessoa com careta, de lado, com luz diferente...), desde que
-    os dois grupos nao tenham rostos na mesma foto.
+    os dois grupos nao tenham rostos na mesma foto e um deles seja pequeno.
+    Dois grupos grandes nunca se juntam por aqui: a media de muitos rostos
+    parece com a de qualquer outra pessoa no mesmo cenario.
     """
     groups = [list(g) for g in groups]
     while len(groups) > 1:
@@ -363,7 +369,8 @@ def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
             a, b = divmod(int(flat), len(groups))
             if S[a, b] < threshold:
                 break
-            if a < b and not (photos[a] & photos[b]):
+            small = min(len(groups[a]), len(groups[b])) <= 3
+            if a < b and small and not (photos[a] & photos[b]):
                 groups[a].extend(groups.pop(b))
                 merged = True
                 break
@@ -407,23 +414,124 @@ def scan_faces(images, engine, log=print, progress=lambda done, total, text=None
 # Alunos (fichas)
 # ---------------------------------------------------------------------------
 
-def match_roster(embs, photo_ids, groups, roster):
+def _name_quality(name):
+    words = name.split()
+    return (sum(w in NAMES for w in words), 2 <= len(words) <= 5, len(name))
+
+
+def group_cards(embs, cards):
     """
-    Liga cada grupo de rostos (mesma pessoa) ao aluno da ficha mais
-    parecido. A decisao e pela media de todas as fotos do grupo, e nao foto a
-    foto: um pai ou irmao parecido pode bater com o aluno numa foto isolada,
-    mas nao na media. Grupos que nao parecem com nenhum aluno (pais,
-    convidados) ficam de fora. Retorna {nome do aluno: [fotos]}.
+    Junta as fotos de ficha do mesmo aluno (o mesmo numero, ou duas fotos
+    seguidas da ficha com o mesmo rosto) e escolhe a melhor leitura do nome e
+    do numero. Retorna [(pasta, [fotos da ficha], [rostos])] na ordem das fotos.
     """
-    names = list(roster)
     X = np.asarray(embs, np.float32)
-    found = {n: set() for n in names}
+    groups = []
+    for ph, (name, code, k) in sorted(cards.items()):
+        g = None
+        for cand in groups:
+            if code and code in cand["codes"]:
+                g = cand
+        last = groups[-1] if groups else None
+        if g is None and last and ph - last["photos"][-1] <= 2 and \
+                float(np.max(X[last["faces"]] @ X[k])) >= 0.6 and \
+                not (code and last["codes"] and code not in last["codes"]):
+            g = last
+        if g is None:
+            g = {"photos": [], "faces": [], "codes": [], "names": []}
+            groups.append(g)
+        g["photos"].append(ph)
+        g["faces"].append(k)
+        if code:
+            g["codes"].append(code)
+        if name:
+            g["names"].append(name)
+    out, used = [], set()
     for g in groups:
-        avg = [float((X[g] @ roster[n].T).max(1).mean()) for n in names]
-        j = int(np.argmax(avg))
-        if avg[j] >= MATCH_STUDENT:
-            found[names[j]].update(int(photo_ids[k]) for k in g)
-    return {n: sorted(ph) for n, ph in found.items()}
+        code = max(sorted(set(g["codes"])), key=lambda c: (g["codes"].count(c), len(c))) \
+            if g["codes"] else ""
+        name = max(g["names"], key=_name_quality) if g["names"] else ""
+        folder = base = folder_name_for(name, code)
+        n = 2
+        while folder in used:           # mesmo nome lido em fichas diferentes
+            folder = "%s_%d" % (base, n)
+            n += 1
+        used.add(folder)
+        out.append((folder, g["photos"], g["faces"]))
+    return out
+
+
+def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
+    """
+    Separa as fotos pelos alunos das fichas, sem agrupar todo mundo antes.
+    1. Sequencia: as fotos logo depois da ficha sao do mesmo aluno enquanto o
+       rosto dele continuar aparecendo e nao for claramente outro aluno (para
+       na proxima ficha ou depois de 2 fotos sem ele). Fotos sem rosto no meio
+       da sequencia (de costas) vao junto.
+    2. O resto: cada rosto vai para o aluno mais parecido, comparando com a
+       ficha e com as fotos ja separadas dele, se for claramente ele.
+    cards: {foto: (nome, codigo, rosto)}. Retorna {pasta: [fotos]}.
+    """
+    X = np.asarray(embs, np.float32)
+    students = group_cards(X, cards)
+    names = [f for f, _, _ in students]
+    refs = {f: list(ks) for f, _, ks in students}
+    first = {f: phs for f, phs, _ in students}
+    faces = {}
+    for k, ph in enumerate(photo_ids):
+        faces.setdefault(int(ph), []).append(k)
+    owner = {}                       # rosto -> aluno
+    photos = {n: set() for n in names}
+
+    def score(k, n):
+        s = np.sort(X[refs[n]] @ X[k])[::-1]
+        return float(s[:3].mean())   # media dos 3 mais parecidos: um erro nao estraga
+
+    def give(k, n):
+        owner[k] = n
+        refs[n].append(k)
+        photos[n].add(int(photo_ids[k]))
+
+    # 1. sequencia depois de cada ficha
+    for n in names:
+        for p in first[n]:
+            i, misses, blank = p + 1, 0, []
+            while i < n_photos and i not in cards and misses < 2:
+                ks = [k for k in faces.get(i, []) if k not in owner]
+                if not faces.get(i):
+                    blank.append(i)
+                elif ks:
+                    k = max(ks, key=lambda k: score(k, n))
+                    other = max([score(k, m) for m in names if m != n] or [-1.0])
+                    if score(k, n) >= SEQ_MATCH and score(k, n) >= other - SEQ_SLACK \
+                            and n not in [owner.get(j) for j in faces[i]]:
+                        give(k, n)
+                        misses = 0
+                        photos[n].update(b for b in blank if b < i)
+                        blank = []
+                    else:
+                        misses += 1
+                else:
+                    misses += 1
+                i += 1
+
+    # 2. rostos que sobraram (fotos de festa, fora de ordem...)
+    for _round in range(2):
+        changed = False
+        for k in range(len(X)):
+            if k in owner or scores[k] < SURE_FACE * 0.9 or len(names) == 0:
+                continue
+            sc = sorted(((score(k, n), n) for n in names), reverse=True)
+            best, n = sc[0]
+            second = sc[1][0] if len(sc) > 1 else -1.0
+            ph = int(photo_ids[k])
+            taken = n in [owner.get(j) for j in faces[ph]]
+            if best >= FREE_MATCH and best - second >= FREE_MARGIN and not taken:
+                give(k, n)
+                changed = True
+        if not changed:
+            break
+    return {n: sorted(photos[n] - set(cards)) for n in names}
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +547,9 @@ CARD_SKIP = {"formatura", "formandos", "colegio", "colégio", "escola", "turma",
 
 # Leitor de letra de mao (PP-OCRv6). Vai dentro do .exe novo; quem tem o .exe
 # antigo baixa uma vez para a pasta "atualizacao".
+CARD_JUNK = {"dados", "contrato", "eventos", "calaeventos", "galaeventos", "formaturas",
+             "gala", "nascimento", "lei", "responsavel", "cadastro", "ficha"}
+
 HAND_MODEL = "PP-OCRv6_rec_small.onnx"
 HAND_URL = "https://github.com/Luci0Camarg0/Testegit/releases/download/modelos/" + HAND_MODEL
 
@@ -526,7 +637,7 @@ def plain(text):
 
 def folder_name_for(name, code):
     """nome_do_aluno_codigo (ex.: alicia_ferreira_guimaraes_0101)."""
-    base = "_".join(plain(name).split()) or "sem_nome"
+    base = "_".join(plain(name).split()) or "aluno"
     return "%s_%s" % (base, code) if code else base
 
 
@@ -624,6 +735,10 @@ borges brito cunha farias fonseca franco garcia leite lourenco macedo magalhaes
 matos medeiros morais neves pacheco peixoto prado queiroz rezende sales sampaio
 siqueira tavares toledo vasconcelos xavier camargo candido baptista bastos bueno
 caetano coelho cruz dantas domingues esteves estevam fabri galvao gimenes
+antonella aurora liz luisa mariah mirella maya heloise ana lis melina ana clarice
+cecilia benicio bento otto ravi lucca vicente kaleb henry apollo matteo mathias
+pietro joaquim davi gael raul lorenzo enzo valentim antony theodoro bryan
+mendonca modesto barros bairos zanetti rizzo
 junior filho neto sobrinho
 """.split())
 
@@ -660,13 +775,18 @@ def best_name(reads, vocab):
     return " ".join(out)
 
 
-def _name_read(text):
+def _name_read(text, need_label=False):
     """Texto lido no campo do nome -> palavras do nome (sem o rotulo e sem "Serie")."""
-    low = text.lower()
-    for key in ("formando", "ormando", "mando", "ando:"):
+    low = plain(text) if need_label else text.lower()
+    if any(w in plain(text) for w in ("facul", "colegio", "cidade", "bairro", "endereco")):
+        return ""                    # pegou outra linha da ficha
+    for key in ("formando", "ormando", "mando", "ando", "ndo"):
         if key in low:
-            text = text[low.find(key) + len(key):]
+            text = (plain(text) if need_label else text)[low.find(key) + len(key):]
             break
+    else:
+        if need_label:
+            return ""
     words = []
     for w in plain(text).split():
         if w.endswith("serie") and len(w) > 5:
@@ -677,47 +797,93 @@ def _name_read(text):
     return " ".join(words)
 
 
-def read_gala_card(img, res):
-    """
-    Ficha da Gala Eventos: nome escrito em "Nome/Formando" e o numero grande
-    do canto de cima. Retorna (nome, codigo) ou None se nao for esse modelo.
-    """
-    lab = [r for r in res if "formand" in r[1].lower()]
-    if not lab:
-        return None
-    ocr = get_ocr()
-    lab = lab[0]
-    b = _box(lab)
-    c = b.mean(0)
-    h = float(b[:, 1].max() - b[:, 1].min())
-    fac = [r for r in res if "faculdade" in r[1].lower() or "colegio" in plain(r[1])]
-    top = float(_box(fac[0])[:, 1].min()) if fac else float(c[1] - 2 * h)
-    sp = float(abs(c[1] - _box(fac[0]).mean(0)[1])) if fac else 1.3 * h
+GALA_LABEL = re.compile(r"formand|ormand|rmando|mando|ando:|ndo:")
+GALA_MARK = re.compile(r"gala|formaturas|faculdade|instagram|chinelo")
 
-    # codigo: o numero escrito grande acima da linha "Faculdade/Colegio". O
-    # tracado grosso de caneta e lido melhor com a imagem menor.
+
+def _gala_code(img, res, bottom):
+    """
+    Numero escrito grande no canto de cima da ficha, acima de `bottom` (ele
+    desce ate perto da linha do nome). A leitura da ficha inteira vale mais; o
+    recorte em tamanhos menores ajuda quando o tracado e grosso.
+    """
+    ocr = get_ocr()
     W = img.shape[1]
-    zone = img[0:int(max(10, top)), int(0.45 * W):W]
-    found = [(r, 1.0) for r in res if _box(r)[:, 1].max() <= top + 0.3 * h]
+    zone = img[0:int(max(10, bottom)), int(0.4 * W):W]
+    found = [(r, 1.0, 3.0) for r in res
+             if _box(r).mean(0)[1] < bottom and _box(r)[:, 0].min() > 0.4 * W]
     if zone.size:
         for sc in (0.3, 0.45, 0.6, 1.0):
             z = cv2.resize(zone, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA) if sc != 1 else zone
-            found += [(r, 1.0 / sc) for r in (ocr(z)[0] or [])]
+            found += [(r, 1.0 / sc, 1.0) for r in (ocr(z)[0] or [])]
     votes = {}
-    for r, k in found:
+    for r, k, wt in found:
         txt = r[1].replace(" ", "")
         dig = sum(ch.isdigit() for ch in txt)
         if r[2] >= 0.6 and dig >= 2 and dig >= 0.8 * len(txt):
             d = re.sub(r"\D", "", txt)
             size = float(np.ptp(_box(r)[:, 1])) * k
-            v = votes.get(d, (0, 0.0))
-            votes[d] = (v[0] + 1, max(v[1], size))
+            v = votes.get(d, (0.0, 0.0))
+            votes[d] = (v[0] + wt * r[2], max(v[1], size))
     # o mais lido ganha; empate: o mais completo ("243" ganha de "24")
-    code = max(votes, key=lambda d: (votes[d][0], len(d), votes[d][1])) if votes else ""
+    code = max(votes, key=lambda d: (round(votes[d][0], 1), len(d), votes[d][1])) if votes else ""
+    return code
+
+
+def _label_line(res, lab):
+    """Texto do rotulo do nome + caixas lidas logo depois dele, na mesma linha."""
+    b = _box(lab)
+    end = (b[1] + b[2]) / 2           # meio da borda direita do rotulo
+    hl = max(4.0, float(b[2][1] - b[1][1]))
+    nxt = []
+    for r in res:
+        rb = _box(r)
+        start = (rb[0] + rb[3]) / 2
+        if r is not lab and abs(start[1] - end[1]) < 0.4 * hl and \
+                end[0] - 2 * hl <= start[0] <= end[0] + 3 * hl:
+            nxt.append((float(start[0]), r[1]))
+    return " ".join([lab[1]] + [t for _, t in sorted(nxt)])
+
+
+def read_gala_card(img, res):
+    """
+    Ficha da Gala Eventos: nome escrito em "Nome/Formando" e o numero grande
+    do canto de cima. Retorna (nome, codigo) ou None se nao for esse modelo.
+    """
+    lab = [r for r in res if GALA_LABEL.search(r[1].lower())]
+    fac = [r for r in res if "faculdade" in r[1].lower() or "colegio" in plain(r[1])]
+    if not lab:
+        if not any(GALA_MARK.search(plain(r[1])) for r in res):
+            return None
+        bottom = float(_box(fac[0])[:, 1].max()) if fac else 0.35 * img.shape[0]
+        code = _gala_code(img, res, bottom)
+        if not fac:
+            return "", code
+        # a linha do nome nao foi achada: le de novo so a faixa abaixo de
+        # "Faculdade/Colegio", maior. Sem nome legivel fica so o numero.
+        fb = _box(fac[0])
+        y = float(fb.mean(0)[1])
+        fh = float(np.ptp(fb[:, 1]))
+        band = img[int(y):int(y + 1.6 * fh)]
+        if band.shape[0] < 8:
+            return "", code
+        band = cv2.resize(band, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+        rs = [r for r in (get_ocr()(band)[0] or []) if r[2] >= 0.5]
+        lab = [r for r in rs if GALA_LABEL.search(r[1].lower())]
+        name = _name_read(_label_line(rs, lab[0])) if lab else ""
+        vocab = {w for r in res for w in plain(r[1]).split() if len(w) >= 4}
+        return (best_name([name], vocab) if name else ""), code
+    lab = lab[0]
+    b = _box(lab)
+    c = b.mean(0)
+    h = float(b[:, 1].max() - b[:, 1].min())
+    sp = float(abs(c[1] - _box(fac[0]).mean(0)[1])) if fac else 1.3 * h
+    code = _gala_code(img, res, float(c[1] - 0.4 * h))
+    ocr = get_ocr()
 
     # nome: varias leituras da linha "Nome/Formando" (desentortada), com e sem
     # folga para cima (a letra de mao sobe da linha)
-    reads = [_name_read(lab[1])]
+    reads = [_name_read(_label_line(res, lab))]
     ang = float(np.degrees(np.arctan2(b[1][1] - b[0][1], b[1][0] - b[0][0])))
     rot = cv2.getRotationMatrix2D((float(c[0]), float(c[1])), ang, 1.0)
     img_r = cv2.warpAffine(img, rot, (img.shape[1], img.shape[0]), borderValue=(255, 255, 255))
@@ -739,7 +905,7 @@ def read_gala_card(img, res):
                 if sc > 1 else band
             rr, _ = ocr(im, use_det=False, use_cls=False)
             if rr and rr[0][1] >= 0.5:
-                reads.append(_name_read(rr[0][0]))
+                reads.append(_name_read(rr[0][0], need_label=True))
     vocab = set()
     for r in res:
         if r is not lab:
@@ -777,7 +943,7 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
     """
     Acha, no meio das fotos da festa, as fotos de ficha: poucas pessoas e,
     logo abaixo do maior rosto, um texto com nome e codigo. Retorna
-    {foto: (nome da pasta, rosto do aluno)}.
+    {foto: (nome, codigo, rosto do aluno)}.
     """
     sure = {}
     for k, ph in enumerate(photo_ids):
@@ -802,11 +968,15 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
         except Exception as e:
             log("Leitor de fichas falhou: %s" % e)
             break
-        # na ficha da Gala Eventos, sem numero legivel a pasta fica so com o nome
-        if (code and len(name.replace(" ", "")) >= 3) or \
+        words = plain(name).split()
+        if len(words) > 6 or any(w in CARD_JUNK for w in words):
+            name = ""               # pegou o texto impresso da ficha, nao o nome
+        # na ficha da Gala Eventos, sem numero legivel a pasta fica so com o
+        # nome, e sem nome legivel fica so com o numero
+        if (code and (gala or len(name.replace(" ", "")) >= 3)) or \
                 (gala and len(name.split()) >= 2 and len(name.replace(" ", "")) >= 6):
-            cards[ph] = (folder_name_for(name, code), k, code)
-            log("Ficha: %s -> %s" % (os.path.basename(images[ph]), cards[ph][0]))
+            cards[ph] = (name, code, k)
+            log("Ficha: %s -> %s" % (os.path.basename(images[ph]), folder_name_for(name, code)))
     return cards
 
 
@@ -835,34 +1005,26 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
     log("Procurando fotos de ficha...")
     cards = find_cards(images, photo_ids, scores, boxes, log, progress)
 
-    log("Agrupando %d rostos..." % len(embs))
-    groups = cluster_faces(embs, photo_ids)
-    # grupo formado so por deteccoes duvidosas = provavelmente nao e um rosto
-    groups = [g for g in groups if max(scores[k] for k in g) >= SURE_FACE]
-    if not groups:
-        raise RuntimeError("Nenhum rosto encontrado nas fotos.")
-
     if cards:
-        roster, by_code = {}, {}
-        for ph, (folder, k, code) in sorted(cards.items()):
-            folder = by_code.setdefault(code or folder, folder)   # mesma ficha 2x: um aluno so
-            roster.setdefault(folder, []).append(embs[k])
-        roster = {n: np.array(v, np.float32) for n, v in roster.items()}
-        log("Separando os %d aluno(s) das fichas..." % len(roster))
-        found = match_roster(embs, photo_ids, groups, roster)
-        # a foto da ficha nao vai para a pasta do aluno
-        people = [(n, [p for p in ph if p not in cards]) for n, ph in found.items()]
-        missing = [n for n, ph in people if not ph]
-        people = [(n, ph) for n, ph in people if ph]
+        log("Separando os alunos das %d ficha(s)..." % len(cards))
+        found = assign_by_cards(embs, photo_ids, scores, cards, len(images))
+        people = [(n, ph) for n, ph in found.items() if ph]
+        missing = [n for n, ph in found.items() if not ph]
         if report is not None:
-            report["fichas"] = len(roster)
+            report["fichas"] = len(found)
             report["missing"] = missing
         if missing:
             log("Alunos sem fotos além da ficha: " + ", ".join(missing))
         if not people:
             raise RuntimeError("Achei %d ficha(s), mas nenhum desses alunos aparece nas "
-                               "outras fotos." % len(roster))
+                               "outras fotos." % len(found))
     else:
+        log("Agrupando %d rostos..." % len(embs))
+        groups = cluster_faces(embs, photo_ids)
+        # grupo formado so por deteccoes duvidosas = provavelmente nao e um rosto
+        groups = [g for g in groups if max(scores[k] for k in g) >= SURE_FACE]
+        if not groups:
+            raise RuntimeError("Nenhum rosto encontrado nas fotos.")
         # mais fotos primeiro (aluno_1 = quem mais aparece)
         phs = sorted([sorted({int(photo_ids[k]) for k in g}) for g in groups],
                      key=lambda ph: (-len(ph), ph[0]))
