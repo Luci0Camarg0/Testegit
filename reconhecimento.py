@@ -17,6 +17,7 @@ import re
 import json
 import sys
 import shutil
+import hashlib
 import threading
 import queue
 import subprocess
@@ -30,7 +31,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 12
+VERSAO = 13
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -774,7 +775,17 @@ def best_name(reads, vocab):
             s = sum(max(0.0, 1 - _edit(c, e) / float(max(len(c), len(e)))) for e in ev)
             return s + (1.5 if c in vocab else 0) + (2 if c in NAMES else 0)
         out.append(max(sorted(cands), key=score))
-    return " ".join(out)
+    return " ".join(_split_glued(w) for w in out)
+
+
+def _split_glued(word):
+    """Nome escrito colado: "joaopedro" -> "joao pedro"."""
+    if word in NAMES or len(word) < 6:
+        return word
+    for i in range(3, len(word) - 2):
+        if word[:i] in NAMES and word[i:] in NAMES:
+            return word[:i] + " " + word[i:]
+    return word
 
 
 def _name_read(text, need_label=False):
@@ -803,6 +814,9 @@ GALA_LABEL = re.compile(r"formand|ormand|rmando|mando|ando:|ndo:")
 GALA_MARK = re.compile(r"gala|formaturas|faculdade|instagram|chinelo")
 
 
+DIGIT_LOOKALIKE = str.maketrans("CcOoDQIl|Zz", "00000011122")
+
+
 def _gala_code(img, res, bottom):
     """
     Numero escrito grande no canto de cima da ficha, acima de `bottom` (ele
@@ -815,12 +829,28 @@ def _gala_code(img, res, bottom):
     found = [(r, 1.0, 3.0) for r in res
              if _box(r).mean(0)[1] < bottom and _box(r)[:, 0].min() > 0.4 * W]
     if zone.size:
+        # a ficha esta de pe (o rosto esta de pe): sem o classificador de giro,
+        # que as vezes le o numero de cabeca para baixo ("pohz" = 2400)
         for sc in (0.3, 0.45, 0.6, 1.0):
             z = cv2.resize(zone, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA) if sc != 1 else zone
-            found += [(r, 1.0 / sc, 1.0) for r in (ocr(z)[0] or [])]
+            found += [(r, 1.0 / sc, 1.0) for r in (ocr(z, use_cls=False)[0] or [])]
+        # so a tinta grossa da caneta, sem o QR code e as letras impressas por tras
+        gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+        ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        k = max(3, int(W / 200) | 1)
+        ink = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        clean = cv2.cvtColor(255 - ink, cv2.COLOR_GRAY2BGR)
+        for sc in (0.5, 1.0):
+            z = cv2.resize(clean, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA) if sc != 1 else clean
+            found += [(r, 1.0 / sc, 2.0) for r in (ocr(z, use_cls=False)[0] or [])]
     votes = {}
     for r, k, wt in found:
         txt = r[1].replace(" ", "")
+        if sum(ch.isdigit() for ch in txt) >= 2 and len(txt) >= 3:
+            fixed = txt.translate(DIGIT_LOOKALIKE)     # "241C" -> "2410"
+            if fixed != txt and fixed.isdigit():
+                txt, wt = fixed, wt * 0.6
         dig = sum(ch.isdigit() for ch in txt)
         if r[2] >= 0.6 and dig >= 2 and dig >= 0.8 * len(txt):
             d = re.sub(r"\D", "", txt)
@@ -897,17 +927,35 @@ def read_gala_card(img, res):
         if (("n°" in r[1] or "nº" in r[1]) and rb2[:, 0].min() > left + 2 * h
                 and abs(rb2[:, 1].mean() - c[1]) < 0.6 * sp):
             right = min(right, float(rb2[:, 0].min()))
-    for up, down in ((0.8, 0.3), (0.65, 0.35)):
-        band = img_r[int(max(0, c[1] - up * sp)):int(c[1] + down * sp),
-                     int(max(0, left - 5)):int(right)]
-        if band.shape[0] < 8 or band.shape[1] < 20:
-            continue
-        for sc in (1, 2):
-            im = cv2.resize(band, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC) \
-                if sc > 1 else band
-            rr, _ = ocr(im, use_det=False, use_cls=False)
-            if rr and rr[0][1] >= 0.5:
-                reads.append(_name_read(rr[0][0], need_label=True))
+    def band_reads(tall):
+        out = []
+        for up, down in ((0.8, 0.3), (0.65, 0.35)):
+            top = up * (max(sp, 1.1 * h) if tall else sp)
+            low = down * (max(sp, 1.1 * h) if tall else sp)
+            band = img_r[int(max(0, c[1] - top)):int(c[1] + low),
+                         int(max(0, left - 5)):int(right)]
+            if band.shape[0] < 8 or band.shape[1] < 20:
+                continue
+            for sc in (1, 2):
+                im = cv2.resize(band, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC) \
+                    if sc > 1 else band
+                rr, _ = ocr(im, use_det=False, use_cls=False)
+                if rr and rr[0][1] >= 0.5:
+                    out.append(_name_read(rr[0][0], need_label=True))
+        return out
+
+    def letters(rs):
+        return sum(len(r.replace(" ", "")) for r in rs) / float(max(1, len(rs)))
+
+    # a faixa cortada (linha muito junta da de cima) le so o fim do nome:
+    # tenta uma faixa mais alta; se ainda vier curto, fica a leitura da linha
+    first = len(reads[0].replace(" ", "")) if reads[0] else 0
+    more = band_reads(False)
+    if first >= 5 and letters(more) < 0.6 * first:
+        more = band_reads(True)
+        if letters(more) < 0.6 * first:
+            more = []
+    reads += more
     vocab = set()
     for r in res:
         if r is not lab:
@@ -975,6 +1023,10 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
             name = ""               # pegou o texto impresso da ficha, nao o nome
         # na ficha da Gala Eventos, sem numero legivel a pasta fica so com o
         # nome, e sem nome legivel fica so com o numero
+        if gala and not code and (len(name.split()) < 2 or len(name.replace(" ", "")) < 6):
+            # e a ficha da Gala, mas nao deu para ler: a pasta leva o nome da foto
+            # para o aluno nao ir para sem_aluno
+            name = "aluno " + os.path.splitext(os.path.basename(images[ph]))[0]
         if (code and (gala or len(name.replace(" ", "")) >= 3)) or \
                 (gala and len(name.split()) >= 2 and len(name.replace(" ", "")) >= 6):
             cards[ph] = (name, code, k)
@@ -1176,6 +1228,108 @@ def check_text(rep):
     return text
 
 
+THUMB_PX = 150              # tamanho das miniaturas da galeria
+
+
+def photos_in(folder):
+    """Fotos direto dentro da pasta (sem subpastas), em ordem natural."""
+    try:
+        names = [n for n in os.listdir(folder)
+                 if os.path.splitext(n)[1].lower() in IMAGE_EXTS
+                 and os.path.isfile(os.path.join(folder, n))]
+    except OSError:
+        return []
+    return [os.path.join(folder, n) for n in sorted(names, key=natural_key)]
+
+
+def thumbs_dir():
+    """Miniaturas guardadas ao lado da pasta Eventos (abrem na hora da 2a vez)."""
+    d = os.path.join(os.path.dirname(data_dir()), "miniaturas")
+    if not os.path.isdir(d):
+        try:
+            os.makedirs(d)
+            if sys.platform.startswith("win"):
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(d, 2)    # pasta oculta
+        except (OSError, AttributeError):
+            pass
+    return d
+
+
+def load_photo(path, max_side):
+    """Abre a foto ja reduzida (rapido em JPG grande) e na posicao certa."""
+    from PIL import Image, ImageOps
+    im = Image.open(path)
+    im.draft("RGB", (max_side, max_side))
+    im = ImageOps.exif_transpose(im)
+    return im.convert("RGB")
+
+
+def make_thumb(path, size=THUMB_PX, cache=None):
+    """Miniatura da foto. Usa a copia guardada se a foto nao mudou (vale
+    tambem depois de mover a foto para outra pasta)."""
+    from PIL import Image
+    key = None
+    if cache:
+        st = os.stat(path)
+        key = os.path.join(cache, hashlib.md5(("%s|%d|%d|%d" % (
+            os.path.basename(path).lower(), st.st_size, int(st.st_mtime), size)
+        ).encode("utf-8")).hexdigest() + ".jpg")
+        if os.path.isfile(key):
+            try:
+                im = Image.open(key)
+                im.load()
+                return im
+            except Exception:
+                pass
+    im = load_photo(path, size * 2)
+    im.thumbnail((size, size), Image.LANCZOS)
+    if key:
+        try:
+            im.save(key, quality=85)
+        except OSError:
+            pass
+    return im
+
+
+def free_path(folder, name):
+    """Caminho em `folder` que ainda nao existe (foto.jpg, foto_2.jpg...)."""
+    base, ext = os.path.splitext(name)
+    dst, k = os.path.join(folder, name), 2
+    while os.path.exists(dst):
+        dst = os.path.join(folder, "%s_%d%s" % (base, k, ext))
+        k += 1
+    return dst
+
+
+def move_photos(paths, dest):
+    """Move fotos para outra pasta. Retorna ([(de, para)], [erros])."""
+    done, errors = [], []
+    for p in paths:
+        try:
+            if os.path.normcase(os.path.dirname(p)) == os.path.normcase(dest):
+                continue
+            dst = free_path(dest, os.path.basename(p))
+            shutil.move(p, dst)
+            done.append((p, dst))
+        except OSError as e:
+            errors.append("%s: %s" % (os.path.basename(p), e))
+    return done, errors
+
+
+def create_folder(parent, name):
+    """Cria uma pasta. Retorna (caminho, None) ou (None, mensagem de erro)."""
+    err = validate_new_name(parent, "", name)
+    if err:
+        return None, err
+    path = os.path.join(parent, name.strip())
+    try:
+        os.makedirs(path)
+    except OSError as e:
+        return None, "Não foi possível criar a pasta:\n%s" % e
+    return path, None
+
+
 def validate_new_name(parent, old, new):
     """Retorna mensagem de erro ou None se o novo nome pode ser usado."""
     new = new.strip()
@@ -1274,13 +1428,40 @@ def run_gui():
     canvas.pack(side="left", fill="both", expand=True)
     sb.pack(side="right", fill="y")
 
+    # --- galeria (fotos de um aluno) -----------------------------------------
+    gal = tk.Frame(win, bg=BG, padx=12)
+    side = tk.Frame(gal, bg=BG)
+    side.pack(side="left", fill="y", padx=(0, 10))
+    tk.Label(side, text="Mover para:", bg=BG, fg=FG, font=font_b, anchor="w").pack(fill="x")
+    tk.Label(side, text="Arraste as fotos para o aluno\ncerto. Dois cliques abrem.",
+             bg=BG, fg=FG_DIM, font=("Segoe UI", 9), justify="left", anchor="w").pack(fill="x")
+    targets = tk.Listbox(side, bg=PANEL, fg=FG, font=("Segoe UI", 10), width=30, relief="flat",
+                         highlightthickness=1, highlightbackground="#2a2a2a",
+                         highlightcolor="#2a2a2a", selectbackground=ACCENT,
+                         selectforeground=FG, activestyle="none", exportselection=False)
+    targets.pack(fill="both", expand=True, pady=(6, 0))
+    gcan = tk.Canvas(gal, bg=BG, highlightthickness=1, highlightbackground="#2a2a2a", bd=0,
+                     yscrollincrement=40)
+    gsb = ttk.Scrollbar(gal, orient="vertical", command=gcan.yview,
+                        style="Dark.Vertical.TScrollbar")
+    gcan.configure(yscrollcommand=gsb.set)
+    gsb.pack(side="right", fill="y")
+    gcan.pack(side="left", fill="both", expand=True)
+    TILE_W, TILE_H, GAP = THUMB_PX + 12, THUMB_PX + 34, 10
+    g = {"items": [], "sel": set(), "anchor": None, "hover": None, "press": None,
+         "drag": None, "drop": None, "targets": [], "undo": [], "mode": "lista"}
+    thumbs = {}                     # foto -> miniatura pronta para a tela
+    asked = set()
+    thumb_q = queue.Queue()
+    cache = thumbs_dir()
+
     # --- rodape -------------------------------------------------------------
     bottom = tk.Frame(win, bg=BG, padx=12, pady=10)
     bottom.pack(fill="x")
     prog = ttk.Progressbar(bottom, mode="determinate", style="Dark.Horizontal.TProgressbar")
     prog.pack(fill="x")
     status_var = tk.StringVar(value="Pronto. Clique em 'Adicionar pasta de fotos'.  "
-                                    "Botão direito numa pasta para renomear.")
+                                    "Botão direito para renomear ou criar pasta.")
     status_row = tk.Frame(bottom, bg=BG)
     status_row.pack(fill="x", pady=(6, 0))
     tk.Label(status_row, textvariable=status_var, bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
@@ -1342,6 +1523,14 @@ def run_gui():
 
     def refresh(*_):
         cancel_edit()
+        if in_gallery():
+            cur = state["current"]
+            where_var.set("Eventos  ›  " + os.path.relpath(cur, root_dir).replace(os.sep, "  ›  "))
+            back_btn.configure(state="normal")
+            show_mode("galeria")
+            refresh_gallery()
+            return
+        show_mode("lista")
         q = search_var.get().strip().lower()
         rows = []   # (caminho, texto, info, icone)
         cur = state["current"]
@@ -1420,14 +1609,25 @@ def run_gui():
 
     # --- acoes --------------------------------------------------------------
     def enter(path):
-        if os.path.dirname(path) == root_dir:
-            state["current"] = path
-            state["sel"] = None
-            search_var.set("")
-            canvas.yview_moveto(0)
-            refresh()
-        else:
-            open_in_explorer(path)
+        """Abre uma festa (lista de alunos) ou um aluno (galeria de fotos)."""
+        if not os.path.isdir(path):
+            return
+        state["current"] = path
+        state["sel"] = None
+        g["sel"] = set()
+        g["anchor"] = None
+        while not thumb_q.empty():        # miniaturas da pasta anterior: nao precisa mais
+            try:
+                asked.discard(thumb_q.get_nowait())
+            except queue.Empty:
+                break
+        search_var.set("")
+        canvas.yview_moveto(0)
+        gcan.yview_moveto(0)
+        refresh()
+        if in_gallery():
+            status_var.set("Dois cliques numa foto para ver grande. Arraste as fotos para o "
+                           "aluno certo na lista da esquerda.")
 
     def on_click(e):
         cancel_edit()
@@ -1465,15 +1665,22 @@ def run_gui():
         draw_rows()
 
     def go_back():
-        if state["current"] is None:
+        cur = state["current"]
+        if cur is None:
             return
-        state["sel"] = state["current"]
-        state["current"] = None
+        parent = os.path.dirname(cur)
+        state["current"] = None if os.path.normcase(parent) == os.path.normcase(root_dir) \
+            else parent
+        state["sel"] = cur
+        g["sel"] = {cur}
         search_var.set("")
         refresh()
 
     def open_sel():
-        open_in_explorer(state["sel"] or state["current"] or root_dir)
+        if in_gallery():
+            open_in_explorer(state["current"])
+        else:
+            open_in_explorer(state["sel"] or state["current"] or root_dir)
 
     # --- renomear -----------------------------------------------------------
     def cancel_edit(*_):
@@ -1483,6 +1690,11 @@ def run_gui():
             ed.destroy()
 
     def start_rename(path=None):
+        if in_gallery():
+            sel = [p for p, k in g["items"] if k == "pasta" and p in g["sel"]]
+            if sel:
+                rename_dialog(sel[0])
+            return
         path = path or state["sel"]
         if not path or state["busy"]:
             return
@@ -1550,18 +1762,19 @@ def run_gui():
     def on_right(e):
         cancel_edit()
         i = row_at(e)
-        if i is None:
-            return
-        path = state["rows"][i][0]
-        state["sel"] = path
-        draw_rows()
         menu.delete(0, "end")
-        is_event = os.path.dirname(path) == root_dir
-        menu.add_command(label="Abrir" if is_event else "Abrir pasta",
-                         command=lambda: enter(path))
-        menu.add_command(label="Abrir no Explorer", command=lambda: open_in_explorer(path))
-        menu.add_separator()
-        menu.add_command(label="Renomear        F2", command=lambda: start_rename(path))
+        here = state["current"] or root_dir
+        if i is not None:
+            path = state["rows"][i][0]
+            state["sel"] = path
+            draw_rows()
+            menu.add_command(label="Abrir", command=lambda: enter(path))
+            menu.add_command(label="Abrir no Explorer", command=lambda: open_in_explorer(path))
+            menu.add_separator()
+            menu.add_command(label="Renomear        F2", command=lambda: start_rename(path))
+        menu.add_command(label="Criar pasta", command=lambda: new_folder(here))
+        if i is None:
+            menu.add_command(label="Abrir no Explorer", command=lambda: open_in_explorer(here))
         try:
             menu.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1572,6 +1785,538 @@ def run_gui():
         add_btn.configure(state="disabled" if on else "normal")
         if on:
             prog["value"] = 0
+
+    # --- galeria ------------------------------------------------------------
+    def in_gallery():
+        cur = state["current"]
+        return cur is not None and os.path.dirname(cur) != root_dir
+
+    def show_mode(mode):
+        if g["mode"] == mode:
+            return
+        g["mode"] = mode
+        if mode == "galeria":
+            mid.pack_forget()
+            gal.pack(fill="both", expand=True, before=bottom)
+        else:
+            gal.pack_forget()
+            mid.pack(fill="both", expand=True, before=bottom)
+
+    def festa_of(path):
+        while os.path.dirname(path) != root_dir and os.path.dirname(path) != path:
+            path = os.path.dirname(path)
+        return path
+
+    def fill_targets():
+        cur = state["current"]
+        festa = festa_of(cur)
+        paths = []
+        for a in subdirs(festa):
+            pa = os.path.join(festa, a)
+            paths.append(pa)
+            paths += [os.path.join(pa, b) for b in subdirs(pa)]
+        g["targets"] = [p for p in paths if os.path.normcase(p) != os.path.normcase(cur)]
+        targets.delete(0, "end")
+        for p in g["targets"]:
+            rel = os.path.relpath(p, festa).replace(os.sep, " / ")
+            targets.insert("end", "%s  (%d)" % (rel, len(photos_in(p))))
+
+    def refresh_gallery():
+        q = search_var.get().strip().lower()
+        cur = state["current"]
+        items = [(os.path.join(cur, d), "pasta") for d in subdirs(cur)] + \
+                [(p, "foto") for p in photos_in(cur)]
+        if q:
+            items = [it for it in items if q in os.path.basename(it[0]).lower()]
+        g["items"] = items
+        g["sel"] &= {p for p, _ in items}
+        g["hover"] = None
+        fill_targets()
+        draw_gallery()
+
+    def cols():
+        return max(1, (max(gcan.winfo_width(), 200) - GAP) // (TILE_W + GAP))
+
+    def tile_xy(i):
+        c = cols()
+        return GAP + (i % c) * (TILE_W + GAP), GAP + (i // c) * (TILE_H + GAP)
+
+    def tile_at(x, y):
+        """Indice da miniatura no ponto (coordenadas do canvas) ou None."""
+        c = cols()
+        col, row = int((x - GAP) // (TILE_W + GAP)), int((y - GAP) // (TILE_H + GAP))
+        if col < 0 or row < 0 or col >= c:
+            return None
+        i = row * c + col
+        if i >= len(g["items"]):
+            return None
+        tx, ty = tile_xy(i)
+        return i if tx <= x <= tx + TILE_W and ty <= y <= ty + TILE_H else None
+
+    def short(name, n=22):
+        return name if len(name) <= n else name[:n - 1] + "…"
+
+    def draw_gallery():
+        gcan.delete("all")
+        items = g["items"]
+        for i, (path, kind) in enumerate(items):
+            x, y = tile_xy(i)
+            sel = path in g["sel"]
+            outline = ACCENT_HOVER if g["drop"] == path else \
+                ("#666666" if i == g["hover"] else "")
+            gcan.create_rectangle(x, y, x + TILE_W, y + TILE_H, fill=ROW_SEL if sel else PANEL,
+                                  outline=outline, width=2)
+            cx, cy = x + TILE_W / 2, y + 6 + THUMB_PX / 2
+            if kind == "pasta":
+                gcan.create_polygon(cx - 48, cy - 30, cx - 16, cy - 30, cx - 8, cy - 22,
+                                    cx + 48, cy - 22, cx + 48, cy + 34, cx - 48, cy + 34,
+                                    fill=ACCENT, outline="")
+                gcan.create_text(cx, cy + 6, text="%d foto(s)" % len(photos_in(path)),
+                                 fill=FG, font=("Segoe UI", 9, "bold"))
+            elif path in thumbs:
+                gcan.create_image(cx, cy, image=thumbs[path])
+            else:
+                gcan.create_text(cx, cy, text="carregando...", fill=FG_DIM,
+                                 font=("Segoe UI", 9))
+                ask_thumb(path)
+            gcan.create_text(cx, y + TILE_H - 14, text=short(os.path.basename(path)),
+                             fill=FG, font=("Segoe UI", 9))
+        if not items:
+            gcan.create_text(16, 24, anchor="w", fill=FG_DIM, font=font,
+                             text="Nenhuma foto encontrada." if search_var.get().strip()
+                             else "Esta pasta está vazia.")
+        rows = (len(items) + cols() - 1) // cols()
+        h = GAP + rows * (TILE_H + GAP)
+        gcan.configure(scrollregion=(0, 0, gcan.winfo_width(), max(h, gcan.winfo_height())))
+
+    redraw_pending = {"on": False}
+
+    def redraw_soon():
+        if not redraw_pending["on"]:
+            redraw_pending["on"] = True
+
+            def go():
+                redraw_pending["on"] = False
+                if g["mode"] == "galeria":
+                    draw_gallery()
+            win.after(60, go)
+
+    def ask_thumb(path):
+        if path not in asked:
+            asked.add(path)
+            thumb_q.put(path)
+
+    def thumb_worker():
+        while True:
+            path = thumb_q.get()
+            try:
+                msgs.put(("thumb", path, make_thumb(path, THUMB_PX, cache)))
+            except Exception:
+                msgs.put(("thumb", path, None))
+
+    for _ in range(2):
+        threading.Thread(target=thumb_worker, daemon=True).start()
+
+    def got_thumb(path, im):
+        if im is None:
+            from PIL import Image as _I
+            im = _I.new("RGB", (THUMB_PX, THUMB_PX), "#333333")
+        if len(thumbs) > 3000:
+            thumbs.clear()
+            asked.clear()
+        thumbs[path] = ImageTk.PhotoImage(im)
+        redraw_soon()
+
+    def photo_items():
+        return [p for p, k in g["items"] if k == "foto"]
+
+    def g_select(i, ctrl=False, shift=False):
+        path = g["items"][i][0]
+        if ctrl:
+            g["sel"] ^= {path}
+        elif shift and g["anchor"] is not None and g["anchor"] < len(g["items"]):
+            a, b = sorted((g["anchor"], i))
+            g["sel"] = {p for p, _ in g["items"][a:b + 1]}
+        else:
+            g["sel"] = {path}
+        if not shift:
+            g["anchor"] = i
+
+    def g_press(e):
+        gcan.focus_set()
+        x, y = gcan.canvasx(e.x), gcan.canvasy(e.y)
+        i = tile_at(x, y)
+        ctrl, shift = bool(e.state & 0x0004), bool(e.state & 0x0001)
+        g["press"] = (e.x, e.y, i, ctrl or shift)
+        if i is None:
+            if not (ctrl or shift):
+                g["sel"] = set()
+        elif ctrl or shift or g["items"][i][0] not in g["sel"]:
+            g_select(i, ctrl, shift)
+        draw_gallery()
+
+    def drop_target(xr, yr):
+        w = win.winfo_containing(xr, yr)
+        if w is targets and g["targets"]:
+            k = targets.nearest(yr - targets.winfo_rooty())
+            bb = targets.bbox(k)
+            if bb and bb[1] <= yr - targets.winfo_rooty() <= bb[1] + bb[3]:
+                return g["targets"][k], k
+        elif w is gcan:
+            i = tile_at(gcan.canvasx(xr - gcan.winfo_rootx()),
+                        gcan.canvasy(yr - gcan.winfo_rooty()))
+            if i is not None and g["items"][i][1] == "pasta":
+                return g["items"][i][0], None
+        return None, None
+
+    def g_motion(e):
+        pr = g["press"]
+        if pr is None:
+            return
+        if g["drag"] is None:
+            if pr[2] is None or abs(e.x - pr[0]) + abs(e.y - pr[1]) < 8:
+                return
+            paths = [p for p in photo_items() if p in g["sel"]]
+            if not paths:
+                return
+            ind = tk.Toplevel(win)
+            ind.overrideredirect(True)
+            try:
+                ind.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            tk.Label(ind, text="  Mover %d foto(s)  " % len(paths), bg=ACCENT, fg=FG,
+                     font=font_b, pady=4).pack()
+            g["drag"] = (paths, ind)
+            gcan.configure(cursor="fleur")
+        ind = g["drag"][1]
+        ind.geometry("+%d+%d" % (e.x_root + 14, e.y_root + 10))
+        target, k = drop_target(e.x_root, e.y_root)
+        targets.selection_clear(0, "end")
+        if k is not None:
+            targets.selection_set(k)
+            targets.see(k)
+        if target != g["drop"]:
+            g["drop"] = target
+            draw_gallery()
+        # rola a galeria quando arrasta perto da borda
+        if e.y < 20:
+            gcan.yview_scroll(-1, "units")
+        elif e.y > gcan.winfo_height() - 20:
+            gcan.yview_scroll(1, "units")
+
+    def g_release(e):
+        pr, drag = g["press"], g["drag"]
+        g["press"] = None
+        if drag is None:
+            if pr and pr[2] is not None and not pr[3]:
+                g_select(pr[2])         # clique simples numa foto ja marcada
+                draw_gallery()
+            return
+        g["drag"] = None
+        drag[1].destroy()
+        gcan.configure(cursor="")
+        target, _k = drop_target(e.x_root, e.y_root)
+        g["drop"] = None
+        targets.selection_clear(0, "end")
+        if target:
+            do_move(drag[0], target)
+        else:
+            draw_gallery()
+
+    def do_move(paths, dest):
+        done, errors = move_photos(paths, dest)
+        if done:
+            g["undo"] = done
+            status_var.set("%d foto(s) movida(s) para \"%s\".  Ctrl+Z desfaz."
+                           % (len(done), os.path.basename(dest)))
+        g["sel"] = set()
+        refresh()
+        if errors:
+            messagebox.showerror(APP_NAME, "Não foi possível mover:\n" +
+                                 "\n".join(errors[:10]), parent=win)
+        return done
+
+    def undo_move(_e=None):
+        if not g["undo"]:
+            return
+        back = [(dst, os.path.dirname(src)) for src, dst in g["undo"]]
+        g["undo"] = []
+        n = 0
+        for dst, folder in back:
+            try:
+                shutil.move(dst, free_path(folder, os.path.basename(dst)))
+                n += 1
+            except OSError:
+                pass
+        status_var.set("Desfeito: %d foto(s) voltaram para o lugar." % n)
+        refresh()
+
+    def move_menu(parent_menu, paths):
+        sub = tk.Menu(parent_menu, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT,
+                      activeforeground=FG, bd=0, font=font)
+        festa = festa_of(state["current"])
+        for p in g["targets"]:
+            sub.add_command(label=os.path.relpath(p, festa).replace(os.sep, " / "),
+                            command=lambda p=p: do_move(paths, p))
+        sub.add_separator()
+        sub.add_command(label="Nova pasta de aluno...",
+                        command=lambda: new_folder(festa, then_move=paths))
+        return sub
+
+    def g_double(e):
+        i = tile_at(gcan.canvasx(e.x), gcan.canvasy(e.y))
+        if i is not None:
+            open_item(i)
+
+    def open_item(i):
+        path, kind = g["items"][i]
+        if kind == "pasta":
+            enter(path)
+        else:
+            ph = photo_items()
+            open_viewer(ph, ph.index(path))
+
+    def g_right(e):
+        gcan.focus_set()
+        i = tile_at(gcan.canvasx(e.x), gcan.canvasy(e.y))
+        menu.delete(0, "end")
+        cur = state["current"]
+        if i is not None:
+            path, kind = g["items"][i]
+            if path not in g["sel"]:
+                g_select(i)
+                draw_gallery()
+            if kind == "foto":
+                paths = [p for p in photo_items() if p in g["sel"]]
+                menu.add_command(label="Ver foto", command=lambda: open_item(i))
+                menu.add_cascade(label="Mover %d foto(s) para" % len(paths),
+                                 menu=move_menu(menu, paths))
+                menu.add_command(label="Mostrar no Explorer",
+                                 command=lambda: show_in_explorer(path))
+            else:
+                menu.add_command(label="Abrir pasta", command=lambda: enter(path))
+                menu.add_command(label="Renomear        F2",
+                                 command=lambda: rename_dialog(path))
+            menu.add_separator()
+        menu.add_command(label="Criar pasta aqui dentro", command=lambda: new_folder(cur))
+        menu.add_command(label="Criar pasta de aluno na festa",
+                         command=lambda: new_folder(festa_of(cur)))
+        menu.add_command(label="Abrir no Explorer", command=lambda: open_in_explorer(cur))
+        if g["undo"]:
+            menu.add_separator()
+            menu.add_command(label="Desfazer última mudança     Ctrl+Z", command=undo_move)
+        try:
+            menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            menu.grab_release()
+
+    def g_key_move(step):
+        n = len(g["items"])
+        if not n:
+            return
+        cur = [i for i, (p, _) in enumerate(g["items"]) if p in g["sel"]]
+        i = max(0, min(n - 1, (cur[-1] + step) if cur else 0))
+        g_select(i)
+        x, y = tile_xy(i)
+        top, bot = gcan.canvasy(0), gcan.canvasy(gcan.winfo_height())
+        total = float(gcan.bbox("all")[3]) if gcan.bbox("all") else 1.0
+        if y < top or y + TILE_H > bot:
+            gcan.yview_moveto(max(0.0, (y - GAP) / max(total, 1.0)))
+        draw_gallery()
+
+    def g_enter(_e=None):
+        sel = [i for i, (p, _) in enumerate(g["items"]) if p in g["sel"]]
+        if sel:
+            open_item(sel[0])
+
+    def g_select_all(_e=None):
+        g["sel"] = set(photo_items())
+        draw_gallery()
+        return "break"
+
+    def target_double(e):
+        k = targets.nearest(e.y)
+        if 0 <= k < len(g["targets"]):
+            enter(g["targets"][k])
+
+    def show_in_explorer(path):
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        else:
+            open_in_explorer(os.path.dirname(path))
+
+    # --- nome de pasta (criar / renomear na galeria) ------------------------
+    def ask_name(title, initial):
+        d = tk.Toplevel(win)
+        d.title(title)
+        d.configure(bg=BG, padx=16, pady=14)
+        d.transient(win)
+        d.resizable(False, False)
+        tk.Label(d, text=title, bg=BG, fg=FG, font=font_b, anchor="w").pack(fill="x")
+        ent = tk.Entry(d, font=font, bg=PANEL, fg=FG, insertbackground=FG, relief="flat",
+                       highlightthickness=1, highlightbackground=ACCENT,
+                       highlightcolor=ACCENT, width=36)
+        ent.pack(fill="x", pady=(8, 12), ipady=5)
+        ent.insert(0, initial)
+        ent.select_range(0, "end")
+        out = {"v": None}
+        row = tk.Frame(d, bg=BG)
+        row.pack(fill="x")
+
+        def ok(_e=None):
+            out["v"] = ent.get().strip()
+            d.destroy()
+        make_button(row, "OK", ok, primary=True).pack(side="right")
+        make_button(row, "Cancelar", d.destroy).pack(side="right", padx=(0, 8))
+        ent.bind("<Return>", ok)
+        ent.bind("<KP_Enter>", ok)
+        d.bind("<Escape>", lambda e: d.destroy())
+        d.update_idletasks()
+        d.geometry("+%d+%d" % (win.winfo_rootx() + (win.winfo_width() - d.winfo_width()) // 2,
+                               win.winfo_rooty() + 120))
+        ent.focus_set()
+        try:
+            d.grab_set()
+        except tk.TclError:
+            pass
+        win.wait_window(d)
+        return out["v"]
+
+    def new_folder(parent, then_move=None):
+        if state["busy"] and parent == root_dir:
+            return
+        name = "nova_pasta"
+        while True:
+            name = ask_name("Nome da nova pasta", name)
+            if not name:
+                return
+            path, err = create_folder(parent, name)
+            if not err:
+                break
+            messagebox.showerror(APP_NAME, err, parent=win)
+        status_var.set("Pasta \"%s\" criada." % name)
+        if then_move:
+            do_move(then_move, path)
+        else:
+            if not in_gallery():
+                state["sel"] = path
+            refresh()
+
+    def rename_dialog(path):
+        old = os.path.basename(path)
+        new = old
+        while True:
+            new = ask_name("Novo nome da pasta", new)
+            if not new or new == old:
+                return
+            err = validate_new_name(os.path.dirname(path), old, new)
+            if not err:
+                break
+            messagebox.showerror(APP_NAME, err, parent=win)
+        try:
+            os.rename(path, os.path.join(os.path.dirname(path), new))
+        except OSError as ex:
+            messagebox.showerror(APP_NAME, "Não foi possível renomear:\n%s\n\nFeche as "
+                                 "fotos abertas dessa pasta e tente de novo." % ex, parent=win)
+            return
+        status_var.set("\"%s\" renomeada para \"%s\"." % (old, new))
+        refresh()
+
+    # --- ver a foto grande ---------------------------------------------------
+    def open_viewer(paths, idx):
+        v = tk.Toplevel(win)
+        v.configure(bg="#000000")
+        v.geometry("%dx%d+20+20" % (min(1100, v.winfo_screenwidth() - 60),
+                                     min(780, v.winfo_screenheight() - 100)))
+        try:
+            v.state("zoomed")
+        except tk.TclError:
+            pass
+        try:
+            v.iconbitmap(os.path.join(resource_dir(), "assets", "icone.ico"))
+        except Exception:
+            pass
+        vbar = tk.Frame(v, bg=BG, padx=10, pady=8)
+        vbar.pack(side="bottom", fill="x")
+        vc = tk.Canvas(v, bg="#000000", highlightthickness=0)
+        vc.pack(fill="both", expand=True)
+        vs = {"paths": list(paths), "i": idx, "src": None, "for": None, "img": None,
+              "job": None}
+        side_max = max(v.winfo_screenwidth(), v.winfo_screenheight())
+
+        def show(_e=None):
+            if not vs["paths"]:
+                v.destroy()
+                return
+            path = vs["paths"][vs["i"]]
+            if vs["for"] != path:
+                try:
+                    vs["src"] = load_photo(path, side_max)
+                except Exception:
+                    vs["src"] = None
+                vs["for"] = path
+            vc.delete("all")
+            w, h = max(vc.winfo_width(), 50), max(vc.winfo_height(), 50)
+            if vs["src"] is not None:
+                im = vs["src"].copy()
+                im.thumbnail((w, h), Image.LANCZOS)
+                vs["img"] = ImageTk.PhotoImage(im)
+                vc.create_image(w / 2, h / 2, image=vs["img"])
+            else:
+                vc.create_text(w / 2, h / 2, text="Não foi possível abrir a foto.", fill=FG,
+                               font=font)
+            name = os.path.basename(path)
+            info.configure(text="%s      %d de %d" % (name, vs["i"] + 1, len(vs["paths"])))
+            v.title("%s  —  %s" % (name, os.path.basename(os.path.dirname(path))))
+
+        def later(_e=None):
+            if vs["job"]:
+                v.after_cancel(vs["job"])
+            vs["job"] = v.after(80, show)
+
+        def step(k):
+            if vs["paths"]:
+                vs["i"] = (vs["i"] + k) % len(vs["paths"])
+                show()
+
+        def move_here(dest):
+            path = vs["paths"][vs["i"]]
+            if do_move([path], dest):
+                vs["paths"].pop(vs["i"])
+                if not vs["paths"]:
+                    v.destroy()
+                    return
+                vs["i"] = min(vs["i"], len(vs["paths"]) - 1)
+                show()
+
+        def move_popup():
+            m = tk.Menu(v, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT,
+                        activeforeground=FG, bd=0, font=font)
+            festa = festa_of(state["current"])
+            for p in g["targets"]:
+                m.add_command(label=os.path.relpath(p, festa).replace(os.sep, " / "),
+                              command=lambda p=p: move_here(p))
+            try:
+                m.tk_popup(move_b.winfo_rootx(), move_b.winfo_rooty() - 10)
+            finally:
+                m.grab_release()
+
+        make_button(vbar, "‹  Anterior", lambda: step(-1)).pack(side="left")
+        make_button(vbar, "Próxima  ›", lambda: step(1)).pack(side="left", padx=(8, 0))
+        info = tk.Label(vbar, text="", bg=BG, fg=FG, font=font)
+        info.pack(side="left", padx=16)
+        make_button(vbar, "Fechar", v.destroy).pack(side="right")
+        move_b = make_button(vbar, "Mover para...", move_popup, primary=True)
+        move_b.pack(side="right", padx=(0, 8))
+        vc.bind("<Configure>", later)
+        v.bind("<Left>", lambda e: step(-1))
+        v.bind("<Right>", lambda e: step(1))
+        v.bind("<Escape>", lambda e: v.destroy())
+        vc.bind("<Button-1>", lambda e: step(1 if e.x > vc.winfo_width() / 2 else -1))
+        vc.bind("<MouseWheel>", lambda e: step(-1 if e.delta > 0 else 1))
+        v.focus_set()
+        show()
 
     # --- atualizacao ---------------------------------------------------------
     def update_job():
@@ -1641,6 +2386,8 @@ def run_gui():
                     status_var.set("%s %d de %d" % (m[3] or "Analisando fotos...", m[1], m[2]))
                 elif m[0] == "update":
                     show_update(m[1])
+                elif m[0] == "thumb":
+                    got_thumb(m[1], m[2])
                 elif m[0] in ("done", "error"):
                     busy(False)
                     if m[0] == "done":
@@ -1684,6 +2431,28 @@ def run_gui():
     canvas.bind("<MouseWheel>", on_wheel)
     canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
     canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+    gcan.bind("<Configure>", lambda e: g["mode"] == "galeria" and draw_gallery())
+    gcan.bind("<ButtonPress-1>", g_press)
+    gcan.bind("<B1-Motion>", g_motion)
+    gcan.bind("<ButtonRelease-1>", g_release)
+    gcan.bind("<Double-1>", g_double)
+    gcan.bind("<Button-3>", g_right)
+    gcan.bind("<MouseWheel>",
+              lambda e: gcan.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1),
+                                          "units"))
+    gcan.bind("<Button-4>", lambda e: gcan.yview_scroll(-1, "units"))
+    gcan.bind("<Button-5>", lambda e: gcan.yview_scroll(1, "units"))
+    gcan.bind("<Left>", lambda e: g_key_move(-1))
+    gcan.bind("<Right>", lambda e: g_key_move(1))
+    gcan.bind("<Up>", lambda e: g_key_move(-cols()))
+    gcan.bind("<Down>", lambda e: g_key_move(cols()))
+    gcan.bind("<Return>", g_enter)
+    gcan.bind("<BackSpace>", lambda e: go_back())
+    gcan.bind("<Control-a>", g_select_all)
+    gcan.bind("<Control-A>", g_select_all)
+    win.bind("<Control-z>", undo_move)
+    win.bind("<Control-Z>", undo_move)
+    targets.bind("<Double-1>", target_double)
     canvas.bind("<Up>", lambda e: move_sel(-1))
     canvas.bind("<Down>", lambda e: move_sel(1))
     canvas.bind("<Return>", lambda e: state["sel"] and enter(state["sel"]))

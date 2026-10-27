@@ -14,9 +14,25 @@ O QUE O PROGRAMA FAZ
 - Barra de pesquisa:
     * na tela "Eventos" ela procura as festas E as pastas aluno_X dentro delas;
     * dentro de uma festa ela procura só as pastas aluno_X daquela festa.
-- Dois cliques numa festa abre a festa. Dois cliques num aluno abre a pasta no Explorer.
+- Dois cliques numa festa abre a festa. Dois cliques num aluno abre a galeria
+  de fotos dele, dentro do programa.
 - Botão direito numa festa ou num aluno > "Renomear" (ou selecione e aperte F2).
   Digite o novo nome e aperte Enter (Esc cancela). Nomes repetidos não são aceitos.
+- Botão direito > "Criar pasta": cria uma pasta nova (uma festa, um aluno ou
+  uma pasta dentro do aluno).
+
+GALERIA DO ALUNO
+- Mostra as fotos em miniatura. Na primeira vez elas aparecem aos poucos;
+  depois abrem na hora.
+- Dois cliques numa foto abre ela grande. Setas do teclado (ou clique nas
+  laterais da foto) passam para a próxima e a anterior. Esc fecha.
+- Foto no aluno errado: arraste a foto até o aluno certo na lista "Mover para"
+  da esquerda, ou até uma pasta dentro da galeria. Para várias fotos, segure Ctrl
+  e clique em cada uma (Shift marca um intervalo, Ctrl+A marca todas).
+- Também dá pelo botão direito > "Mover para", ou pelo botão "Mover para..."
+  na foto grande. Ctrl+Z desfaz a última mudança.
+- Aluno que ficou sem pasta: botão direito > "Criar pasta de aluno na festa",
+  ou "Mover para" > "Nova pasta de aluno..." já cria e move a foto.
 
 ALUNOS PELAS FICHAS (para separar só os formandos)
 - Na mesma pasta das fotos da festa ou da colação, coloque também as fotos de
@@ -42,7 +58,8 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
   grande do canto de cima. O nome escrito à mão é conferido com os outros
   campos (nome dos pais, e-mail) e com nomes comuns. Se o número não der
   para ler, a pasta sai só com o nome (alicia_ferreira_guimaraes). Se o nome
-  não der para ler, sai só com o número (aluno_2372).
+  não der para ler, sai só com o número (aluno_2372). Se nada der para ler, a
+  pasta leva o nome da foto da ficha (aluno_2t1a9968), mas o aluno não se perde.
 - A foto da ficha deve mostrar só o aluno, de frente, com a ficha abaixo do
   rosto. Se o nome sair errado, clique com o botão direito na pasta > Renomear.
 - Na primeira vez, quem tem o .exe antigo baixa o leitor de letra de mão
