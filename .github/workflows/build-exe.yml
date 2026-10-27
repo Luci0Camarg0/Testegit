@@ -55,6 +55,7 @@ jobs:
           Write-Output $r
           if (-not $r.StartsWith("ok")) { exit 1 }
           if (-not $r.Contains("mao=sim")) { Write-Error "leitor de letra de mao nao foi junto"; exit 1 }
+          if ($r.Contains("nomes=sem")) { Write-Error "conferencia dos nomes com o dicionario nao funcionou"; exit 1 }
           Remove-Item dist/autoteste.txt
 
       - name: Testar o reiniciar depois de atualizar

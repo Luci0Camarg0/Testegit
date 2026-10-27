@@ -49,9 +49,12 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
 - No fim aparece a caixa "Conferência das fotos": ele conta as fotos das pastas
   e compara com o total da pasta original ("Todas as 207 fotos foram
   adicionadas. Nenhuma ficou de fora.").
-- As fotos tiradas logo depois da ficha (as poses do aluno, mesmo de chapéu ou
-  de longe) vão para a pasta dele. As outras fotos (outro cenário, outra hora)
-  vão para o aluno com o rosto mais parecido.
+- As fotos tiradas logo depois da ficha (as poses do aluno) vão para a pasta
+  dele enquanto for claramente o mesmo rosto. As outras fotos (outro cenário,
+  outra hora) só vão para um aluno se o rosto for claramente dele.
+- Na dúvida o programa não arrisca: um aluno nunca vai para a pasta de outro.
+  A foto fica numa pasta aluno_sem_idN (separada pelo rosto) ou em sem_aluno,
+  e você arrasta para o lugar certo na galeria.
 - Duas fotos seguidas da mesma ficha viram uma pasta só.
 - No fim ele avisa quais alunos com ficha não apareceram em outras fotos.
 - Na ficha da Gala Eventos ele lê o nome escrito em "Nome/Formando" e o número
@@ -60,7 +63,12 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
   para ler, a pasta sai só com o nome (alicia_ferreira_guimaraes). Se o nome
   não der para ler, sai só com o número (aluno_2372). Se nada der para ler, a
   pasta sai como aluno_sem_id1, aluno_sem_id2... e as fotos vão pelo rosto.
+- Ficha desfocada ou com a mão na frente: se só o número grande der para ler
+  e ele for da mesma sequência das outras fichas (2412, 2413...), a ficha vale
+  e a pasta sai com o número (aluno_2421).
 - Duas fichas com o mesmo número só viram uma pasta se o rosto for o mesmo.
+  Com rostos diferentes, um dos números foi lido errado: as duas pastas saem
+  com "_conferir" no fim (felipe_medina_2414_conferir) para você olhar.
 - Quem não tem ficha mas aparece em 2 fotos ou mais com o mesmo rosto também
   ganha uma pasta aluno_sem_idN. Quem aparece numa foto só vai para sem_aluno.
 - A foto da ficha deve mostrar só o aluno, de frente, com a ficha abaixo do

@@ -32,7 +32,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 15
+VERSAO = 16
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -61,11 +61,18 @@ SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ign
 MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pessoa e o aluno
 LEFTOVER_FOLDER = "sem_aluno"   # fotos que nao foram para nenhum aluno
 NO_ID_FOLDER = "aluno_sem_id%d"  # aluno sem ficha legivel: separado so pelo rosto
+DOUBT_SUFFIX = "_conferir"   # numero repetido em fichas de alunos diferentes
 SAME_CARD_FACE = 0.65       # duas fichas com o mesmo numero: so junta se for o mesmo rosto
-SEQ_MATCH = 0.30            # foto logo depois da ficha: basta isso para ser do mesmo aluno
-SEQ_SLACK = 0.05            # ...desde que nao pareca mais com outro aluno
-FREE_MATCH = 0.40           # foto fora da sequencia da ficha: precisa parecer mais
-FREE_MARGIN = 0.04          # ...e mais que com o segundo aluno mais parecido
+SEQ_MATCH = 0.62            # foto logo depois da ficha: o mesmo aluno fica acima disso
+SEQ_WEAK = 0.40             # rosto de lado/borrado: so vai se o aluno aparecer de novo logo depois
+SEQ_MARGIN = 0.10           # ...e tem que parecer claramente mais com ele do que com outro aluno
+NEAR_MARGIN = 0.05          # foto sozinha colada nas fotos do aluno: basta parecer mais com ele
+ALONE_MATCH = 0.55          # foto sozinha longe das fotos do aluno: tem que parecer com ele
+ALONE_MARGIN = 0.20         # ...e muito mais do que com qualquer outro aluno
+FREE_GROUP = 0.55           # fotos fora da sequencia: primeiro junta as da mesma pessoa
+FREE_MATCH = 0.65           # ...e o grupo so vai para o aluno se parecer muito com ele
+FREE_MARGIN = 0.15          # ...e bem mais do que com o segundo aluno mais parecido
+NO_ID_SAME = 0.50           # fotos sem ficha: mesma pessoa para virar uma pasta aluno_sem_idN
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +326,7 @@ def _dedupe(faces, iou_max=0.35):
 # Agrupamento
 # ---------------------------------------------------------------------------
 
-def cluster_faces(embs, photo_ids, threshold=SAME_PERSON):
+def cluster_faces(embs, photo_ids, threshold=SAME_PERSON, merge=True):
     """
     Agrupa rostos por pessoa (agrupamento por media / average linkage).
     Dois rostos da mesma foto nunca vao para o mesmo grupo.
@@ -351,7 +358,7 @@ def cluster_faces(embs, photo_ids, threshold=SAME_PERSON):
         clusters[a].extend(clusters.pop(b))
 
     groups = list(clusters.values())
-    return merge_groups(X, groups, ids)
+    return merge_groups(X, groups, ids) if merge else groups
 
 
 def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
@@ -456,11 +463,18 @@ def group_cards(embs, cards):
             g["names"].append(name)
     out, used, no_id = [], set(), 0
     for g in groups:
-        code = max(sorted(set(g["codes"])), key=lambda c: (g["codes"].count(c), len(c))) \
+        g["code"] = max(sorted(set(g["codes"])), key=lambda c: (g["codes"].count(c), len(c))) \
             if g["codes"] else ""
+    taken = [g["code"] for g in groups if g["code"]]
+    for g in groups:
+        code = g["code"]
         name = max(g["names"], key=_name_quality) if g["names"] else ""
         if name or code:
             folder = base = folder_name_for(name, code)
+            if taken.count(code) > 1:
+                # o mesmo numero em fichas de alunos diferentes: um foi lido
+                # errado. Ficam separados e a pasta avisa para conferir
+                folder = base = folder + DOUBT_SUFFIX
         else:
             no_id += 1
             folder = base = NO_ID_FOLDER % no_id
@@ -477,14 +491,20 @@ def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
     """
     Separa as fotos pelos alunos das fichas, sem agrupar todo mundo antes.
     1. Sequencia: as fotos logo depois da ficha sao do mesmo aluno enquanto o
-       rosto dele continuar aparecendo e nao for claramente outro aluno (para
-       na proxima ficha ou depois de 2 fotos sem ele). Fotos sem rosto no meio
-       da sequencia (de costas) vao junto.
-    2. O resto: cada rosto vai para o aluno mais parecido, comparando com a
-       ficha e com as fotos ja separadas dele, se for claramente ele.
+       rosto dele continuar aparecendo e for claramente ele (para na proxima
+       ficha ou depois de 2 fotos sem ele). Fotos sem rosto (de costas) ou com
+       o rosto de lado no meio da sequencia so vao se ele aparecer de novo.
+    2. O resto: junta os rostos da mesma pessoa e o grupo inteiro vai para o
+       aluno so se for claramente ele, comparando com a ficha e a sequencia
+       (uma foto aceita nao serve de base para aceitar a proxima). Na duvida a
+       foto fica de fora (vira aluno_sem_idN ou sem_aluno): um aluno na pasta
+       de outro e pior que uma pasta a mais.
+    3. Foto sozinha de um rosto (de lado, com sombra) colada nas fotos de um
+       aluno ou muito mais parecida com ele do que com qualquer outro.
     cards: {foto: (nome, codigo, rosto)}. Retorna {pasta: [fotos]}.
     """
     X = np.asarray(embs, np.float32)
+    photo_ids = np.asarray(photo_ids)
     students = group_cards(X, cards)
     names = [f for f, _, _ in students]
     refs = {f: list(ks) for f, _, ks in students}
@@ -492,57 +512,98 @@ def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
     faces = {}
     for k, ph in enumerate(photo_ids):
         faces.setdefault(int(ph), []).append(k)
-    owner = {}                       # rosto -> aluno
+    owner = {k: f for f, _, ks in students for k in ks}     # rosto -> aluno
     photos = {n: set() for n in names}
 
-    def score(k, n):
-        s = np.sort(X[refs[n]] @ X[k])[::-1]
+    def score(k, n, base=None):
+        s = np.sort(X[(base or refs)[n]] @ X[k])[::-1]
         return float(s[:3].mean())   # media dos 3 mais parecidos: um erro nao estraga
 
-    def give(k, n):
+    def give(k, n, ref=True):
         owner[k] = n
-        refs[n].append(k)
+        if ref:
+            refs[n].append(k)
         photos[n].add(int(photo_ids[k]))
+
+    def other(k, n):
+        return max([score(k, m) for m in names if m != n] or [-1.0])
 
     # 1. sequencia depois de cada ficha
     for n in names:
         for p in first[n]:
-            i, misses, blank = p + 1, 0, []
+            i, misses, wait = p + 1, 0, []
             while i < n_photos and i not in cards and misses < 2:
                 ks = [k for k in faces.get(i, []) if k not in owner]
+                mine = n in [owner.get(j) for j in faces.get(i, [])]
                 if not faces.get(i):
-                    blank.append(i)
-                elif ks:
+                    wait.append((i, None))
+                elif ks and not mine:
                     k = max(ks, key=lambda k: score(k, n))
-                    other = max([score(k, m) for m in names if m != n] or [-1.0])
-                    if score(k, n) >= SEQ_MATCH and score(k, n) >= other - SEQ_SLACK \
-                            and n not in [owner.get(j) for j in faces[i]]:
+                    s, o = score(k, n), other(k, n)
+                    if s >= SEQ_MATCH and s - o >= SEQ_MARGIN:
                         give(k, n)
                         misses = 0
-                        photos[n].update(b for b in blank if b < i)
-                        blank = []
+                        for b, kb in wait:      # o que ficou esperando no meio vai junto
+                            if kb is None:
+                                photos[n].add(b)
+                            elif kb not in owner:
+                                give(kb, n, ref=False)
+                        wait = []
                     else:
+                        if s >= SEQ_WEAK and s - o >= SEQ_MARGIN:
+                            wait.append((i, k))
                         misses += 1
                 else:
                     misses += 1
                 i += 1
 
     # 2. rostos que sobraram (fotos de festa, fora de ordem...)
-    for _round in range(2):
-        changed = False
-        for k in range(len(X)):
-            if k in owner or scores[k] < SURE_FACE * 0.9 or len(names) == 0:
-                continue
-            sc = sorted(((score(k, n), n) for n in names), reverse=True)
+    base = {n: list(refs[n]) for n in names}
+    left = [k for k in range(len(X)) if k not in owner and scores[k] >= SURE_FACE * 0.9]
+    alone = []
+    if left and names:
+        for g in cluster_faces(X[left], photo_ids[left], threshold=FREE_GROUP, merge=False):
+            ks = [left[j] for j in g]
+            if len(ks) == 1:
+                alone.append(ks[0])
+            sc = sorted(((float(np.mean([score(k, n, base) for k in ks])), n) for n in names),
+                        reverse=True)
             best, n = sc[0]
             second = sc[1][0] if len(sc) > 1 else -1.0
-            ph = int(photo_ids[k])
-            taken = n in [owner.get(j) for j in faces[ph]]
-            if best >= FREE_MATCH and best - second >= FREE_MARGIN and not taken:
-                give(k, n)
-                changed = True
-        if not changed:
-            break
+            if best < FREE_MATCH or best - second < FREE_MARGIN:
+                continue
+            for k in ks:
+                if score(k, n, base) >= SEQ_WEAK and \
+                        n not in [owner.get(j) for j in faces[int(photo_ids[k])]]:
+                    give(k, n, ref=False)
+
+    # 3. foto sozinha (rosto de lado, careta, sombra): vai para o aluno se for
+    # muito mais parecida com ele (comparando tambem com as fotos aceitas no
+    # passo 2) ou, colada numa foto que ja e dele, se ainda parecer mais com
+    # ele. Foto com outras fotos do mesmo rosto nao entra aqui: e outra pessoa
+    # (ficha que nao deu para ver)
+    sure_ph = {n: set(photos[n]) | set(first[n]) for n in names}
+    wide = {n: [k for k in range(len(X)) if owner.get(k) == n and scores[k] >= SURE_FACE * 0.9]
+            for n in names}
+    for k in alone:
+        if k in owner:
+            continue
+        ph = int(photo_ids[k])
+        taken = [owner.get(j) for j in faces[ph]]
+        near = {n for n in names if (ph - 1 in sure_ph[n] or ph + 1 in sure_ph[n])}
+        sc = sorted(((score(k, n, base), n) for n in names), reverse=True)
+        best, n = sc[0]
+        second = sc[1][0] if len(sc) > 1 else -1.0
+        wc = sorted(((score(k, m, wide), m) for m in names if wide[m]), reverse=True)
+        if n in near and best >= SEQ_WEAK and best - second >= NEAR_MARGIN:
+            pass
+        elif wc and wc[0][0] >= ALONE_MATCH and \
+                wc[0][0] - (wc[1][0] if len(wc) > 1 else -1.0) >= ALONE_MARGIN:
+            n = wc[0][1]
+        else:
+            continue
+        if n not in taken:
+            give(k, n, ref=False)
     # a foto da ficha vai so para a pasta do proprio aluno
     return {n: sorted((photos[n] - set(cards)) | set(first[n])) for n in names}
 
@@ -561,7 +622,14 @@ CARD_SKIP = {"formatura", "formandos", "colegio", "colégio", "escola", "turma",
 # Leitor de letra de mao (PP-OCRv6). Vai dentro do .exe novo; quem tem o .exe
 # antigo baixa uma vez para a pasta "atualizacao".
 CARD_JUNK = {"dados", "contrato", "eventos", "calaeventos", "galaeventos", "formaturas",
-             "gala", "nascimento", "lei", "responsavel", "cadastro", "ficha"}
+             "gala", "lei", "responsavel", "cadastro", "ficha"}
+# texto impresso da ficha da Gala (nao e nome de ninguem)
+PRINTED_WORDS = set("""
+acima acordo adolescente alem aluno apenas bairro beca cadastral cadastro chinelo cidade
+colegio compromete conhecimento crianca data dados empresa endereco estado evento eventos
+faculdade formando formandos formatura formaturas foto imagem instagram mail nascimento
+nome perfil responsavel serie termos telefone celular autorizo autorizacao estatuto
+""".split())
 
 HAND_MODEL = "PP-OCRv6_rec_small.onnx"
 HAND_URL = "https://github.com/Luci0Camarg0/Testegit/releases/download/modelos/" + HAND_MODEL
@@ -592,6 +660,21 @@ def hand_model(log=print, download=True):
         return None
 
 
+class _KeepProbs:
+    """Guarda as probabilidades de cada letra da ultima leitura (para conferir
+    o nome lido com o dicionario de nomes)."""
+    def __init__(self, decode):
+        self.decode = decode
+        self.last = None
+
+    def __call__(self, preds, *a, **k):
+        self.last = preds
+        return self.decode(preds, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self.decode, name)
+
+
 def get_ocr(log=print):
     global _ocr
     if _ocr is None:
@@ -601,7 +684,125 @@ def get_ocr(log=print):
             _ocr = RapidOCR(rec_model_path=rec) if rec else RapidOCR()
         except Exception:
             _ocr = RapidOCR()
+        try:
+            _ocr.text_rec.postprocess_op = _KeepProbs(_ocr.text_rec.postprocess_op)
+        except Exception:
+            pass
     return _ocr
+
+
+def _last_probs():
+    """Probabilidades (tempo x letra) da ultima leitura de uma linha so, ou None."""
+    try:
+        p = _ocr.text_rec.postprocess_op.last
+        return p[0] if p is not None and len(p) == 1 else None
+    except Exception:
+        return None
+
+
+_letter_ids = None
+
+
+def _char_ids():
+    """Letra sem acento/minuscula -> indices do leitor (a: a A á à ã â Á...)."""
+    global _letter_ids
+    if _letter_ids is None:
+        chars = _ocr.text_rec.postprocess_op.character
+        _letter_ids = {}
+        for i, c in enumerate(chars):
+            if i == 0:
+                continue                         # 0 = "nada" (blank)
+            key = " " if c == " " else plain(c)
+            if len(key) == 1:
+                _letter_ids.setdefault(key, []).append(i)
+        _letter_ids = {k: np.array(v) for k, v in _letter_ids.items()}
+    return _letter_ids
+
+
+def _ctc_score(P, text):
+    """
+    Quanto a imagem combina com o texto (log da probabilidade CTC), sem ligar
+    para maiuscula e acento. P: probabilidades (tempo x letra).
+    """
+    ids = _char_ids()
+    labs = []
+    for ch in text:
+        key = " " if ch == " " else plain(ch)
+        if len(key) != 1 or key not in ids:
+            return -1e9
+        labs.append(key)
+    if not labs:
+        return float(np.log(P[:, 0] + 1e-12).sum())
+    emit = np.log(np.stack([P[:, ids[c]].sum(1) for c in labs], 1) + 1e-12)
+    blank = np.log(P[:, 0] + 1e-12)
+    L = len(labs)
+    S = 2 * L + 1
+    skip = np.zeros(S, bool)                     # pode pular o "nada" entre letras diferentes
+    for j in range(1, L):
+        skip[2 * j + 1] = labs[j] != labs[j - 1]
+    a = np.full(S, -np.inf)
+    a[0], a[1] = blank[0], emit[0, 0]
+    em = np.empty(S)
+    for t in range(1, len(P)):
+        a1 = np.empty(S)
+        a1[0], a1[1:] = -np.inf, a[:-1]
+        a2 = np.full(S, -np.inf)
+        a2[2:][skip[2:]] = a[:-2][skip[2:]]
+        em[0::2] = blank[t]
+        em[1::2] = emit[t]
+        a = np.logaddexp(np.logaddexp(a, a1), a2) + em
+    return float(np.logaddexp(a[-1], a[-2]))
+
+
+NAME_BONUS = 5.0            # nome conhecido: aceita se a letra combinar quase tao bem quanto a lida
+
+
+def _fix_with_names(text, P, vocab=()):
+    """
+    Linha lida "Nome/Formando: Austave S. Alonso" + probabilidades das letras:
+    troca cada palavra do nome por um nome conhecido parecido (Gustavo) quando
+    a imagem combina quase tao bem com ele quanto com o que foi lido.
+    """
+    if P is None:
+        return text
+    try:
+        return _fix_names(text, P, vocab)
+    except Exception:
+        return text                     # na duvida fica a leitura original
+
+
+def _fix_names(text, P, vocab):
+    m = re.search(r"(?i)ando\s*:?|ande\s*:?", text)
+    start = m.end() if m else 0
+    e = re.search(r"(?i)s[eé]rie", text[start:])
+    end = start + e.start() if e else len(text)
+    pre, post = text[:start], text[end:]
+    parts = []
+    for p in re.findall(r"[^\W\d_]+|[\W\d_]+", text[start:end]):
+        # escrito colado: "deJesus" -> "de" "Jesus"
+        parts += (re.findall(r"[^\W\d_][^\W\d_A-ZÀ-Ý]*", p) or [p]) if p[0].isalpha() else [p]
+    base = _ctc_score(P, text)
+    if base < -1e8:
+        return text
+    known = NAMES | set(vocab)
+    for i, w in enumerate(parts):
+        lw = plain(w)
+        if not w[0].isalpha() or len(lw) < 3 or lw in NAMES:
+            continue
+        lim = max(1, int(0.4 * len(lw) + 0.5))
+        best, pick = base, w
+        for c in sorted(known):
+            if abs(len(c) - len(lw)) > 2 or _edit(c, lw) > lim:
+                continue
+            cw = c.capitalize() if w[0].isupper() else c
+            sc = _ctc_score(P, pre + "".join(parts[:i] + [cw] + parts[i + 1:]) + post)
+            sc += NAME_BONUS if c in NAMES else 0.7 * NAME_BONUS
+            if sc > best:
+                best, pick = sc, cw
+        if pick is not w:
+            parts[i] = pick
+            base = _ctc_score(P, pre + "".join(parts) + post)
+    return pre + "".join(parts) + post
 
 
 def parse_card(lines):
@@ -686,13 +887,17 @@ def card_region(img, box):
     return img[y0:y1, x0:x1]
 
 
-def find_card_box(region):
-    """Acha o papel branco da ficha no recorte. Retorna x0, y0, x1, y1 ou None."""
+def find_card_box(region, sat=55):
+    """
+    Acha o papel branco da ficha no recorte. Retorna x0, y0, x1, y1 ou None.
+    sat: quanto de cor ainda conta como branco (menor = so o papel, sem a pele
+    clara do pescoco e das maos grudada nele).
+    """
     h, w = region.shape[:2]
     k = 400.0 / max(h, w)
     small = cv2.resize(region, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    mask = ((hsv[:, :, 2] > 150) & (hsv[:, :, 1] < 55)).astype(np.uint8) * 255
+    mask = ((hsv[:, :, 2] > 150) & (hsv[:, :, 1] < sat)).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cs:
@@ -753,36 +958,90 @@ cecilia benicio bento otto ravi lucca vicente kaleb henry apollo matteo mathias
 pietro joaquim davi gael raul lorenzo enzo valentim antony theodoro bryan
 mendonca modesto barros bairos zanetti rizzo
 junior filho neto sobrinho
+abner adriano adriel agnes alan alef alessandra alex alexia alicia aline allan alyssa amelia
+analu anabela anderson andressa andrey angela angelo anna anne antonia antonio aquiles
+arthur augusto aurelio barbara beatrice benedito benjamim betina bia brayan bryan
+camilly carla carlos carmem cassio catarina cauã cesar charles chloe cibele cicero clarice
+claudia claudio clovis cristiano cristina dalila damiao danilo dante davi davy denis
+diana diogo douglas dulce edson eduarda elaine eliana elias elisa eloah eloisa emily
+enzo erica erik estela estevao eva evandro ezequiel fabiana fabricio felipe felix flavio
+francine frederico gabriela gael geovanna geovane gerson giane gilberto giovane giovani
+giovanni giovanna gisele glaucia gregorio guilherme gustavo hadassa halley heitor helio
+henzo hilda horacio iago icaro igor ines iris isaias isis israel italo ivan jade jamal
+janaina jaqueline jean jefferson jenifer jeremias joaquim joel jonas jonathan jordana
+josue juan juca julio kaike kaleo karen kauan kenzo laerte lais lana lavinia leila
+leo leon leonor leticia levi lia liam lidia ligia lilian lina lis livia lohan lorena
+lorenzo louise luan luana lucca lucia luciana luciano lucio luiza luna maira manoel
+manuel marcio marco marcia margarida mari mariane marilia mario marisa marta martim
+mateo matias maura mauro max maximo mayara micaela michel michele miguel milton mirela
+moises monica nadia nair natan nathalia nelson nicolas nicolly nina noa noah norberto
+olga oliver omar oscar otavio paola patricia patrick pablo paulo pedro penelope pietra
+pietro poliana priscila rafaela ramon raquel raul rayane regina renata ricardo rita
+roberta roberto rodrigo rogerio ronaldo rosa rosana ruan rubens ruth sabrina salvador
+samuel sandra saulo sebastiao selena sergio silas silvia simone sofia stefany suelen
+tadeu talia tamires tania tatiana teo teodoro thales thalita theo thiago tomas tulio
+ursula vagner valentim valeria valter vanderlei vera vicente victoria vinicius violeta
+virginia vitor vitoria viviane wagner walter wellington wendel willian yan yara yasmin
+yohan yuri zara zoe
+abreu acosta aguiar albuquerque alencar alonso alvarenga amaral amorim andrade antunes
+aparecido aragao arantes arruda assis assuncao avila azevedo bandeira barreto barros
+bastos batista becker belo bernardes bezerra bittencourt bonfim braga branco brandao
+brito bueno cabral caldeira calixto camargo campos cardoso carneiro carrara carvalho
+casagrande castilho castro cavalcante cavalcanti chagas chaves conceicao cordeiro correa
+correia costa coutinho cruz cunha damasceno dias diniz domingos dorneles duarte duque
+esteves evangelista falcao faria farias fernandes ferrari ferraz ferreira figueira
+figueiredo fischer fontes fonseca franca franco freire freitas frota furtado galvao
+gama garcia gaspar godoy goes gomes goncalves gouveia guerra guimaraes hoffmann honorio
+jesus junqueira lacerda lago lara leal leao leite lemos lima linhares lins lisboa lobo
+lopes louro lucena luz macedo machado maciel magalhaes maia malta mancini marangoni
+marinho marques martins matias matos medeiros medina meireles melo mendes mendonca
+menezes mesquita miranda modesto monteiro moraes morais moreira moreno mota moura muller
+nascimento navarro neves nobre nogueira novaes nunes oliveira ornelas pacheco padilha
+paes paiva palma pantoja paranhos pastor pedrosa peixoto pereira peres pimenta pimentel
+pinheiro pinto pires portela porto prado prates queiroz quintana ramalho ramos rangel
+rebelo rego reis resende rezende ribeiro ricci rios rocha rodrigues romano romero rosa
+rossi sa sabino salgado sales salles sampaio sanches santana santiago santos saraiva
+schmidt seixas serafim silveira simoes siqueira soares sobral souza tavares teixeira
+teles toledo torres trindade valente valenca vargas vasconcelos vaz veiga velasco viana
+vidal vieira vilela villa xavier zanforlin zanella
 """.split())
 
 
-def best_name(reads, vocab):
+def best_name(reads, vocab, weights=None):
     """
     Junta varias leituras do mesmo nome escrito a mao: para cada palavra escolhe
     a forma que mais combina com as leituras, com os nomes comuns e com as
-    outras palavras da ficha (nome dos pais, e-mail).
+    outras palavras da ficha (nome dos pais, e-mail). weights: quanto vale
+    cada leitura (a do recorte justo da letra erra menos).
     """
-    lists = [r.split() for r in reads if r.split()]
+    weights = weights or [1.0] * len(reads)
+    lists = [(r.split(), wt) for r, wt in zip(reads, weights) if r.split()]
     if not lists:
         return ""
+    # leitura bem mais curta que as outras pegou so um pedaco do nome
+    size = sorted(len("".join(l)) for l, _ in lists)[len(lists) // 2]
+    lists = [(l, wt * min(1.0, len("".join(l)) / float(size)) ** 2) for l, wt in lists]
     counts = {}
-    for l in lists:
-        counts[len(l)] = counts.get(len(l), 0) + 1
+    for l, wt in lists:
+        # leitura com nomes conhecidos vale mais na hora de contar as palavras
+        counts[len(l)] = counts.get(len(l), 0) + wt * (1 + 0.5 * sum(w in NAMES for w in l))
     n = max(counts, key=lambda k: (counts[k], k))
-    rows = [l for l in lists if len(l) == n]
+    rows = [(l, wt) for l, wt in lists if len(l) == n]
     out = []
     for i in range(n):
-        ev = [l[i] for l in rows]
-        med = min(ev, key=lambda c: sum(_edit(c, e) for e in ev))
-
-        def near(w):
-            lim = 0.45 if len(med) >= 5 else 0.34
-            return abs(len(w) - len(med)) <= 2 and _edit(w, med) <= max(1, int(lim * len(med)))
-        cands = set(ev) | {v for v in vocab if len(v) >= 4 and near(v)} | \
-            {v for v in NAMES if near(v)}
+        ev = [l[i] for l, _ in rows]
+        evw = [wt for _, wt in rows]
+        def near(w, e):
+            lim = 0.45 if len(e) >= 5 else 0.34
+            return abs(len(w) - len(e)) <= 2 and _edit(w, e) <= max(1, int(lim * len(e)))
+        # nomes conhecidos perto de qualquer leitura boa (a pior leitura nao conta)
+        good = [e for e, wt in zip(ev, evw) if len(e) >= 3 and wt >= 1.5] or ev
+        cands = set(ev) | {v for v in vocab if len(v) >= 4 and any(near(v, e) for e in good)} | \
+            {v for v in NAMES if any(near(v, e) for e in good)}
 
         def score(c):
-            s = sum(max(0.0, 1 - _edit(c, e) / float(max(len(c), len(e)))) for e in ev)
+            s = sum(wt * max(0.0, 1 - _edit(c, e) / float(max(len(c), len(e))))
+                    for e, wt in zip(ev, evw))
             return s + (1.5 if c in vocab else 0) + (2 if c in NAMES else 0)
         out.append(max(sorted(cands), key=score))
     return " ".join(_split_glued(w) for w in out)
@@ -812,9 +1071,14 @@ def _name_read(text, need_label=False):
             return ""
     words = []
     for w in plain(text).split():
-        if w.endswith("serie") and len(w) > 5:
-            w = w[:-5]
-        if w in ("serie", "n", "no") or len(w) < 2:
+        # "Serie: 2 ano A" vem depois do nome na mesma linha: para ali
+        cut = next((i for i in range(len(w) - 3) if len(w) - i <= 6 and
+                    _edit(w[i:], "serie") <= 1), None)
+        if cut is not None:
+            if cut >= 3:
+                words.append(w[:cut])
+            break
+        if w in ("n", "no") or len(w) < 2:
             continue
         words.append(w)
     return " ".join(words)
@@ -824,6 +1088,7 @@ GALA_LABEL = re.compile(r"formand|ormand|rmando|mando|ando:|ndo:")
 GALA_MARK = re.compile(r"gala|formaturas|faculdade|instagram|chinelo")
 
 
+CODE_RANGE = 60             # fichas da mesma festa tem numeros proximos (2412, 2413...)
 DIGIT_LOOKALIKE = str.maketrans("CcOoDQIl|Zz", "00000011122")
 
 
@@ -874,6 +1139,11 @@ def _gala_code(img, res, bottom):
 
 def _label_line(res, lab):
     """Texto do rotulo do nome + caixas lidas logo depois dele, na mesma linha."""
+    return " ".join([lab[1]] + [r[1] for r in _label_items(res, lab)])
+
+
+def _label_items(res, lab):
+    """Caixas lidas logo depois do rotulo do nome, na mesma linha, em ordem."""
     b = _box(lab)
     end = (b[1] + b[2]) / 2           # meio da borda direita do rotulo
     hl = max(4.0, float(b[2][1] - b[1][1]))
@@ -883,8 +1153,82 @@ def _label_line(res, lab):
         start = (rb[0] + rb[3]) / 2
         if r is not lab and abs(start[1] - end[1]) < 0.4 * hl and \
                 end[0] - 2 * hl <= start[0] <= end[0] + 3 * hl:
-            nxt.append((float(start[0]), r[1]))
-    return " ".join([lab[1]] + [t for _, t in sorted(nxt)])
+            nxt.append((float(start[0]), id(r), r))
+    return [r for _, _, r in sorted(nxt)]
+
+
+def _ink_crop(band, base, gap=0):
+    """
+    Recorte justo da letra de mao numa faixa da ficha: tira as linhas impressas
+    e fica so com a linha de escrita que passa pela altura `base` (a linha de
+    cima, "Faculdade/Colegio", tambem pode estar escrita). None se nao achar.
+    """
+    if band.shape[0] < 10 or band.shape[1] < 20:
+        return None
+    g = band.min(2).astype(np.float32)          # caneta azul fica escura aqui
+    paper = float(np.percentile(g, 75))
+    # o recorte pode passar da borda da ficha (fundo escuro): corta ali
+    col = (g > paper - 40).mean(0)
+    off = np.convolve(col < 0.3, np.ones(10), "valid") >= 10
+    if off.any():
+        band, g = band[:, :int(np.argmax(off))], g[:, :int(np.argmax(off))]
+        if band.shape[1] < 20:
+            return None
+    ink = (g < paper - max(25.0, 0.18 * paper)).astype(np.uint8)
+    w = band.shape[1]
+    lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, max(15, w // 6)), np.uint8))
+    ink = ink & (1 - lines)
+    ink = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    rows = ink.sum(1).astype(np.float32)
+    if rows.max() < 3:
+        return None
+    on = rows > max(1.0, 0.03 * rows.max())
+    base = int(min(max(base, 0), len(on) - 1))
+    # a linha de escrita mais perto da altura do rotulo
+    cand = [y for y in range(len(on)) if on[y]]
+    if not cand:
+        return None
+    y = min(cand, key=lambda r: abs(r - base))
+    if abs(y - base) > 0.5 * band.shape[0]:
+        return None
+    a = b = y
+    while a > 0 and on[a - 1]:
+        a -= 1
+    while b < len(on) - 1 and on[b + 1]:
+        b += 1
+    if a == 0 and gap and base - gap > 2:
+        # encostou na escrita da linha de cima: corta onde tem menos tinta
+        sm = np.convolve(rows, np.ones(3) / 3.0, "same")
+        a = int(np.argmin(sm[:base - gap]))
+    xs = np.nonzero(ink[a:b + 1].sum(0))[0]
+    if len(xs) < 3 or b - a < 4:
+        return None
+    # o nome acaba num espaco grande (depois vem "n°:" ou a "Serie" impressos)
+    gaps = np.nonzero(np.diff(xs) > 2.0 * (b - a))[0]
+    if len(gaps):
+        xs = xs[:gaps[0] + 1]
+    m = int(0.25 * (b - a)) + 2
+    return band[max(0, a - m):b + m + 1, max(0, int(xs[0]) - m):int(xs[-1]) + m + 1]
+
+
+def _label_end_x(text, P, height):
+    """
+    Onde termina o rotulo "Nome/Formando:" na faixa lida, em pixels: cada
+    passo das probabilidades do leitor cobre 8 pixels da imagem com 48 de
+    altura. None se o rotulo nao foi lido.
+    """
+    m = re.search(r"(?i)(ando|ande|ndo)\s*:?", text)
+    if not m:
+        return None
+    idx = P.argmax(1)
+    steps, prev = [], 0
+    for t, i in enumerate(idx):
+        if i != prev and i != 0:
+            steps.append(t)
+        prev = i
+    if len(steps) != len(text) or m.end() < 1:
+        return None
+    return int((steps[m.end() - 1] + 0.5) * 8 * height / 48.0)
 
 
 def read_gala_card(img, res):
@@ -926,6 +1270,14 @@ def read_gala_card(img, res):
     # nome: varias leituras da linha "Nome/Formando" (desentortada), com e sem
     # folga para cima (a letra de mao sobe da linha)
     reads = [_name_read(_label_line(res, lab))]
+    # palavras do resto da ficha (nome dos pais, e-mail) ajudam a acertar o
+    # sobrenome; as da propria linha do nome nao contam (seria o mesmo erro)
+    same = [lab] + _label_items(res, lab)
+    vocab = set()
+    for r in res:
+        if not any(r is q for q in same):
+            vocab.update(w for w in plain(r[1]).split() if len(w) >= 4 and w.isalpha())
+    vocab -= CARD_JUNK | CARD_SKIP | PRINTED_WORDS
     ang = float(np.degrees(np.arctan2(b[1][1] - b[0][1], b[1][0] - b[0][0])))
     rot = cv2.getRotationMatrix2D((float(c[0]), float(c[1])), ang, 1.0)
     img_r = cv2.warpAffine(img, rot, (img.shape[1], img.shape[0]), borderValue=(255, 255, 255))
@@ -937,6 +1289,8 @@ def read_gala_card(img, res):
         if (("n°" in r[1] or "nº" in r[1]) and rb2[:, 0].min() > left + 2 * h
                 and abs(rb2[:, 1].mean() - c[1]) < 0.6 * sp):
             right = min(right, float(rb2[:, 0].min()))
+    seen = []                           # (faixa, texto lido, probabilidades)
+
     def band_reads(tall):
         out = []
         for up, down in ((0.8, 0.3), (0.65, 0.35)):
@@ -951,7 +1305,35 @@ def read_gala_card(img, res):
                     if sc > 1 else band
                 rr, _ = ocr(im, use_det=False, use_cls=False)
                 if rr and rr[0][1] >= 0.5:
-                    out.append(_name_read(rr[0][0], need_label=True))
+                    P = _last_probs()
+                    if sc == 1 and P is not None:
+                        seen.append((band, rr[0][0], P))
+                    txt = _fix_with_names(rr[0][0], P, vocab)
+                    out.append(_name_read(txt, need_label=True))
+        return out
+
+    def tight_reads():
+        # so a letra de mao, recortada bem justa: o leitor acerta muito mais a
+        # caneta fraca (Laura, Lucas) do que na faixa inteira da linha. O fim
+        # do rotulo "Nome/Formando:" sai da propria leitura da faixa
+        out = []
+        for band, txt, P in seen[:1]:
+            x = _label_end_x(txt, P, band.shape[0])
+            if x is None or x >= band.shape[1] - 10:
+                continue
+            y0 = int(max(0, c[1] - 0.95 * sp))
+            y1 = int(c[1] + 0.45 * sp)
+            x0 = int(max(0, left - 5)) + x
+            crop = _ink_crop(img_r[y0:y1, x0:int(right)], int(c[1]) - y0, int(0.3 * sp))
+            if crop is None:
+                continue
+            for sc in (1, 2):
+                im = cv2.resize(crop, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC) \
+                    if sc > 1 else crop
+                rr, _ = ocr(im, use_det=False, use_cls=False)
+                if rr and rr[0][1] >= 0.5:
+                    t = _fix_with_names(rr[0][0], _last_probs(), vocab)
+                    out.append(_name_read(re.split(r"(?i)s[eé]rie", t)[0]))
         return out
 
     def letters(rs):
@@ -965,37 +1347,69 @@ def read_gala_card(img, res):
         more = band_reads(True)
         if letters(more) < 0.6 * first:
             more = []
-    reads += more
-    vocab = set()
+    try:
+        tight = tight_reads()
+    except Exception:
+        tight = []                      # recorte justo e so um reforco
+    weights = [1.5] + [1.0] * len(more) + [2.0] * len(tight)
+    return best_name(reads + more + tight, vocab, weights), code
+
+
+def _big_number(res, card):
+    """Numero grande (3+ digitos) lido com certeza na metade de cima da ficha."""
+    best = ""
     for r in res:
-        if r is not lab:
-            vocab.update(w for w in plain(r[1]).split() if len(w) >= 4)
-    return best_name(reads, vocab), code
+        txt = r[1].replace(" ", "")
+        fixed = txt.translate(DIGIT_LOOKALIKE)
+        if fixed.isdigit() and len(fixed) >= 3 and sum(c.isdigit() for c in txt) >= 3 and \
+                r[2] >= 0.9 and _box(r).mean(0)[1] < 0.5 * card.shape[0] and \
+                len(fixed) >= len(best):
+            best = fixed
+    return best
 
 
 def read_card_photo(img, face_box):
     """
     Le a ficha que o aluno segura abaixo do rosto. Retorna (nome, codigo, ficha
-    da Gala Eventos?).
+    da Gala Eventos?, numero grande lido mesmo sem achar o resto da ficha).
     """
     region = card_region(img, face_box)
     if region is None:
-        return "", "", False
-    cb = find_card_box(region)
-    if cb is None:
-        return "", "", False
-    card = region[cb[1]:cb[3], cb[0]:cb[2]]
-    hh, ww = card.shape[:2]
-    k = min(1.0, 1600.0 / max(hh, ww))
-    if k < 1:
-        card = cv2.resize(card, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
-    res, _ = get_ocr()(card)
-    res = [r for r in (res or []) if r[2] >= 0.5]
-    gala = read_gala_card(card, res)
-    if gala is not None:
-        return gala[0], gala[1], True
-    name, code = parse_card([r[1] for r in res])
-    return name, code, False
+        return "", "", False, ""
+    seen, first, number = [], None, ""
+    # o recorte do papel branco as vezes pega junto a pele clara do pescoco e
+    # das maos e a leitura falha: tenta de novo so com o branco mais puro
+    for sat in (55, 38, 26):
+        cb = find_card_box(region, sat)
+        if cb is None or any(_iou(cb, o) > 0.85 for o in seen):
+            continue
+        seen.append(cb)
+        card = region[cb[1]:cb[3], cb[0]:cb[2]]
+        hh, ww = card.shape[:2]
+        k = min(1.0, 1600.0 / max(hh, ww))
+        if k < 1:
+            card = cv2.resize(card, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        res, _ = get_ocr()(card)
+        res = [r for r in (res or []) if r[2] >= 0.5]
+        gala = read_gala_card(card, res)
+        if gala is not None:
+            return gala[0], gala[1], True, _big_number(res, card)
+        number = number or _big_number(res, card)
+        if first is None:
+            first = parse_card([r[1] for r in res])
+        if not number:
+            break               # nada de ficha aqui: nao perde tempo lendo de novo
+    if first is None:
+        return "", "", False, ""
+    return first[0], first[1], False, number
+
+
+def _iou(a, b):
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / float(union or 1)
 
 
 def find_cards(images, photo_ids, scores, boxes, log=print,
@@ -1010,7 +1424,7 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
         if scores[k] >= SURE_FACE:
             sure.setdefault(int(ph), []).append(k)
     cands = sorted(ph for ph, ks in sure.items() if len(ks) <= 3)
-    cards = {}
+    cards, maybe, gala_codes = {}, [], []
     if cands:
         get_ocr(log)
     for n, ph in enumerate(cands):
@@ -1024,7 +1438,7 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
         if img is None:
             continue
         try:
-            name, code, gala = read_card_photo(img, boxes[k])
+            name, code, gala, number = read_card_photo(img, boxes[k])
         except Exception as e:
             log("Leitor de fichas falhou: %s" % e)
             break
@@ -1041,7 +1455,27 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
         elif (code and (gala or len(name.replace(" ", "")) >= 3)) or \
                 (gala and len(name.split()) >= 2 and len(name.replace(" ", "")) >= 6):
             cards[ph] = (name, code, k)
+            if gala and code.isdigit():
+                gala_codes.append(code)
             log("Ficha: %s -> %s" % (os.path.basename(images[ph]), folder_name_for(name, code)))
+        elif number:
+            maybe.append((ph, name, number, k))
+    # ficha desfocada ou com a pele grudada no papel: o texto impresso nao foi
+    # lido, mas o numero grande sim. Se o numero e da mesma serie das fichas
+    # da Gala desta pasta, e ficha (senao as fotos do aluno iam para outro)
+    if gala_codes and maybe:
+        size = max(set(map(len, gala_codes)), key=[len(c) for c in gala_codes].count)
+        nums = [int(c) for c in gala_codes]
+        for ph, name, number, k in maybe:
+            if len(number) != size or min(abs(int(number) - c) for c in nums) > CODE_RANGE:
+                continue
+            words = plain(name).split()
+            if len(words) < 2 or len(name.replace(" ", "")) < 6 or \
+                    any(w in CARD_JUNK for w in words) or not name.replace(" ", "").isalpha():
+                name = ""
+            cards[ph] = (name, number, k)
+            log("Ficha: %s -> %s (só deu para ler o número)"
+                % (os.path.basename(images[ph]), folder_name_for(name, number)))
     return cards
 
 
@@ -1102,7 +1536,7 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
         ks = [k for k in range(len(embs))
               if int(photo_ids[k]) in set(rest) and scores[k] >= SURE_FACE]
         if ks:
-            sub = cluster_faces(embs[ks], photo_ids[ks], threshold=0.45)
+            sub = cluster_faces(embs[ks], photo_ids[ks], threshold=NO_ID_SAME, merge=False)
             phs = sorted([sorted({int(photo_ids[ks[j]]) for j in grp}) for grp in sub],
                          key=lambda ph: ph[0])
             used = {f for f, _ in people}
@@ -2551,8 +2985,13 @@ def self_test():
         cv2.putText(img, "MARIA 4821", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
         name, code, lines = read_card(img)
         assert engine.detect(img).shape[1] == 15
-        msg = "ok v%d %s %s mao=%s" % (VERSAO, name, code,
-                                         "sim" if hand_model(download=False) else "nao")
+        # conferencia do nome com o dicionario (usa as probabilidades do leitor)
+        get_ocr()(img[60:140, 0:330], use_det=False, use_cls=False)
+        P = _last_probs()
+        fixed = _fix_names("MARIA", P, ()) if P is not None else "sem"
+        msg = "ok v%d %s %s mao=%s nomes=%s" % (VERSAO, name, code,
+                                                "sim" if hand_model(download=False) else "nao",
+                                                fixed)
     except Exception as e:
         msg = "erro %r" % e
     with open(out, "w", encoding="utf-8") as f:
