@@ -18,6 +18,7 @@ import json
 import sys
 import shutil
 import hashlib
+import traceback
 import threading
 import queue
 import subprocess
@@ -1251,7 +1252,7 @@ def thumbs_dir():
             if sys.platform.startswith("win"):
                 import ctypes
                 ctypes.windll.kernel32.SetFileAttributesW(d, 2)    # pasta oculta
-        except (OSError, AttributeError):
+        except Exception:
             pass
     return d
 
@@ -1346,7 +1347,20 @@ def validate_new_name(parent, old, new):
     return None
 
 
-def run_gui():
+def error_file():
+    return os.path.join(os.path.dirname(data_dir()), "erros.txt")
+
+
+def log_error(text):
+    """Guarda o erro em erros.txt (ao lado da pasta Eventos) para poder ser enviado."""
+    try:
+        with open(error_file(), "a", encoding="utf-8") as f:
+            f.write("--- versao %d ---\n%s\n" % (VERSAO, text))
+    except OSError:
+        pass
+
+
+def run_gui(test=None):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
     from PIL import Image, ImageTk
@@ -1357,6 +1371,20 @@ def run_gui():
     msgs = queue.Queue()
 
     win = tk.Tk()
+
+    def report_error(exc, val, tb):
+        # erro num clique: avisa e continua, em vez de fechar o programa
+        log_error("".join(traceback.format_exception(exc, val, tb)))
+        if test:
+            test_errors.append("%s: %s" % (exc.__name__, val))
+            return
+        try:
+            messagebox.showerror(APP_NAME, "Ocorreu um erro:\n%s\n\nOs detalhes foram salvos em:"
+                                 "\n%s" % (val, error_file()), parent=win)
+        except Exception:
+            pass
+    test_errors = []
+    win.report_callback_exception = report_error
     win.title("%s  —  versão %d" % (APP_NAME, VERSAO))
     win.geometry("820x600")
     win.minsize(560, 420)
@@ -1919,6 +1947,7 @@ def run_gui():
 
     def got_thumb(path, im):
         if im is None:
+            g.setdefault("thumb_fail", []).append(path)
             from PIL import Image as _I
             im = _I.new("RGB", (THUMB_PX, THUMB_PX), "#333333")
         if len(thumbs) > 3000:
@@ -2463,7 +2492,14 @@ def run_gui():
 
     refresh()
     poll()
-    threading.Thread(target=update_job, daemon=True).start()
+    if test:
+        api = {"win": win, "enter": enter, "go_back": go_back, "g": g, "thumbs": thumbs,
+               "open_viewer": open_viewer, "do_move": do_move, "undo": undo_move,
+               "photo_items": photo_items, "state": state, "errors": test_errors,
+               "create": new_folder}
+        win.after(500, lambda: test(api))
+    else:
+        threading.Thread(target=update_job, daemon=True).start()
     search.focus_set()
     win.mainloop()
 
@@ -2492,15 +2528,93 @@ def self_test():
         f.write(msg)
 
 
+def gui_self_test():
+    """Usado no build: abre a janela, a galeria, a foto grande, move e desfaz."""
+    out = os.path.join(app_dir(), "autoteste_janela.txt")
+    root = data_dir()
+    festa = os.path.join(root, "festa_autoteste")
+    shutil.rmtree(festa, ignore_errors=True)
+    for a in ("aluno_a", "aluno_b"):
+        os.makedirs(os.path.join(festa, a))
+        for i in range(4):
+            img = np.full((900, 600, 3), (40 * i, 120, 200), np.uint8)
+            cv2.circle(img, (300, 300), 120, (220, 200, 180), -1)
+            cv2.imwrite(os.path.join(festa, a, "foto_%d.jpg" % i), img)
+    result = {"msg": "erro: nao terminou"}
+
+    def script(api):
+        win, g = api["win"], api["g"]
+        steps = []
+        a, b = os.path.join(festa, "aluno_a"), os.path.join(festa, "aluno_b")
+
+        def check(cond, what):
+            if not cond:
+                api["errors"].append("falhou: " + what)
+
+        def s1():
+            api["enter"](festa)
+            api["enter"](a)
+            check(len(api["photo_items"]()) == 4, "galeria com 4 fotos")
+
+        def s2():
+            check(len(api["thumbs"]) >= 4, "miniaturas (%d)" % len(api["thumbs"]))
+            check(not g.get("thumb_fail"), "miniaturas com erro")
+            api["open_viewer"](api["photo_items"](), 1)
+
+        def s3():
+            for w in win.winfo_children():
+                if w.winfo_class() == "Toplevel":
+                    w.destroy()
+            moved = api["do_move"](api["photo_items"]()[:2], b)
+            check(len(moved) == 2 and len(photos_in(b)) == 6, "mover 2 fotos")
+            api["undo"]()
+            check(len(photos_in(a)) == 4, "desfazer")
+            api["go_back"]()
+            api["go_back"]()
+
+        def s4():
+            errs = api["errors"]
+            result["msg"] = ("ok janela v%d" % VERSAO) if not errs else \
+                "erro: " + " | ".join(errs)
+            win.destroy()
+        steps = [s1, s2, s3, s4]
+
+        def run(i=0):
+            try:
+                steps[i]()
+            except Exception as e:
+                log_error(traceback.format_exc())
+                api["errors"].append("%s: %s" % (type(e).__name__, e))
+                if i < len(steps) - 1:
+                    i = len(steps) - 2
+            if i + 1 < len(steps):
+                win.after(4000 if i == 0 else 1500, lambda: run(i + 1))
+        run()
+
+    try:
+        run_gui(test=script)
+    except Exception:
+        result["msg"] = "erro: " + traceback.format_exc()
+    shutil.rmtree(festa, ignore_errors=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(result["msg"])
+
+
 def main(argv):
     if argv and argv[0] == "--autoteste":
         self_test()
+    elif argv and argv[0] == "--autoteste-janela":
+        gui_self_test()
     elif argv and argv[0] == "--autoteste-reinicio":
         restart_program(["--autoteste"])    # usado no build: testa o reiniciar
     elif argv and os.path.isdir(argv[0]):
         run_cli(argv[0])
     else:
-        run_gui()
+        try:
+            run_gui()
+        except Exception:
+            log_error(traceback.format_exc())
+            raise
 
 
 if __name__ == "__main__":

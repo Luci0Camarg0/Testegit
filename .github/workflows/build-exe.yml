@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
@@ -69,6 +70,43 @@ jobs:
           Write-Output $r
           if (-not $r.StartsWith("ok")) { exit 1 }
           Remove-Item dist/autoteste.txt
+
+      - name: Testar a janela (galeria, foto grande, mover e desfazer)
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist/ReconhecimentoFacial.exe -ArgumentList "--autoteste-janela" -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Error "a janela travou"; exit 1 }
+          $r = Get-Content dist/autoteste_janela.txt -Raw
+          Write-Output $r
+          if (Test-Path dist/erros.txt) { Get-Content dist/erros.txt }
+          if (-not $r.StartsWith("ok")) { exit 1 }
+          Remove-Item dist/autoteste_janela.txt
+
+      - name: Testar a atualizacao nos .exe antigos que o usuario pode ter
+        timeout-minutes: 12
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $falhou = $false
+          # versao 6 (primeira com atualizacao), 8 e 10 (com o leitor de letra de mao)
+          foreach ($run in @("40175592752", "40177608006", "40215438671")) {
+            $d = "old_$run"
+            gh run download $run -n ReconhecimentoFacial -D $d
+            if ($LASTEXITCODE -ne 0) { Write-Output "sem o .exe da execucao $run"; $global:LASTEXITCODE = 0; continue }
+            New-Item -ItemType Directory -Force "$d/atualizacao" | Out-Null
+            Copy-Item reconhecimento.py "$d/atualizacao/reconhecimento.py"
+            $p = Start-Process -FilePath "$d/ReconhecimentoFacial.exe" -ArgumentList "--autoteste-janela" -PassThru
+            if (-not $p.WaitForExit(150000)) { $p.Kill() }
+            Start-Sleep 2
+            $r = if (Test-Path "$d/autoteste_janela.txt") { Get-Content "$d/autoteste_janela.txt" -Raw } else { "sem resultado" }
+            Write-Output "exe da execucao ${run}: $r"
+            if (Test-Path "$d/erros.txt") { Get-Content "$d/erros.txt" }
+            if (Test-Path "$d/atualizacao/reconhecimento.py.com_erro") { Write-Output "a atualizacao foi descartada" }
+            if (-not $r.StartsWith("ok")) { $falhou = $true }
+          }
+          if ($falhou) { exit 1 }
 
       - uses: actions/upload-artifact@v4
         with:
