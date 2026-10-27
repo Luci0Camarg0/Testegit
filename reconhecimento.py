@@ -32,7 +32,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 13
+VERSAO = 14
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -1501,9 +1501,9 @@ def run_gui(test=None):
     logo_src = None
     try:
         logo_src = Image.open(os.path.join(resource_dir(), "assets", "logo.png")).convert("RGBA")
-        r, g, b, a = logo_src.split()
-        a = a.point(lambda v: int(v * LOGO_OPACITY))
-        logo_src = Image.merge("RGBA", (r, g, b, a))
+        ch_r, ch_g, ch_b, ch_a = logo_src.split()
+        ch_a = ch_a.point(lambda v: int(v * LOGO_OPACITY))
+        logo_src = Image.merge("RGBA", (ch_r, ch_g, ch_b, ch_a))
     except Exception:
         logo_src = None
     logo = {"img": None, "size": None}
