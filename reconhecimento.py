@@ -30,7 +30,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 11
+VERSAO = 12
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -57,6 +57,7 @@ SAME_PERSON = 0.36          # similaridade (cosseno) para juntar rostos
 MERGE_GROUPS = 0.42         # similaridade entre medias para juntar grupos da mesma pessoa
 SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ignorada (maos, pele...)
 MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pessoa e o aluno
+LEFTOVER_FOLDER = "sem_aluno"   # fotos que nao foram para nenhum aluno
 SEQ_MATCH = 0.30            # foto logo depois da ficha: basta isso para ser do mesmo aluno
 SEQ_SLACK = 0.05            # ...desde que nao pareca mais com outro aluno
 FREE_MATCH = 0.40           # foto fora da sequencia da ficha: precisa parecer mais
@@ -531,7 +532,8 @@ def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
                 changed = True
         if not changed:
             break
-    return {n: sorted(photos[n] - set(cards)) for n in names}
+    # a foto da ficha vai so para a pasta do proprio aluno
+    return {n: sorted((photos[n] - set(cards)) | set(first[n])) for n in names}
 
 
 # ---------------------------------------------------------------------------
@@ -1009,15 +1011,12 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
         log("Separando os alunos das %d ficha(s)..." % len(cards))
         found = assign_by_cards(embs, photo_ids, scores, cards, len(images))
         people = [(n, ph) for n, ph in found.items() if ph]
-        missing = [n for n, ph in found.items() if not ph]
+        missing = [n for n, ph in found.items() if not set(ph) - set(cards)]
         if report is not None:
             report["fichas"] = len(found)
             report["missing"] = missing
         if missing:
             log("Alunos sem fotos além da ficha: " + ", ".join(missing))
-        if not people:
-            raise RuntimeError("Achei %d ficha(s), mas nenhum desses alunos aparece nas "
-                               "outras fotos." % len(found))
     else:
         log("Agrupando %d rostos..." % len(embs))
         groups = cluster_faces(embs, photo_ids)
@@ -1030,8 +1029,16 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
                      key=lambda ph: (-len(ph), ph[0]))
         people = [("aluno_%d" % i, ph) for i, ph in enumerate(phs, 1)]
 
+    # fotos que nao foram para nenhum aluno (sem rosto, outras pessoas) nao se
+    # perdem: vao para uma pasta separada
+    placed = {p for _, ph in people for p in ph}
+    rest = [p for p in range(len(images)) if p not in placed]
+    if rest:
+        people.append((LEFTOVER_FOLDER, rest))
+
     event = os.path.join(out_root, next_numbered_name(out_root, "festa"))
     os.makedirs(event)
+    copied = {}                      # foto de origem -> arquivos criados
     for folder, ph in people:
         d = os.path.join(event, folder)
         os.makedirs(d)
@@ -1044,8 +1051,21 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
                 name = "%s_%d%s" % (base, k, ext)
                 k += 1
             used.add(name.lower())
-            shutil.copy2(images[p], os.path.join(d, name))
+            dst = os.path.join(d, name)
+            shutil.copy2(images[p], dst)
+            copied.setdefault(p, []).append(dst)
+
+    # conferencia: cada foto da pasta original tem que estar em alguma pasta
+    ok = [p for p in range(len(images)) if any(os.path.isfile(f) for f in copied.get(p, ()))]
+    if report is not None:
+        report["total"] = len(images)
+        report["placed"] = len(ok)
+        report["multi"] = sum(len(v) > 1 for v in copied.values())
+        report["leftover"] = len(rest)
+        report["lost"] = [os.path.basename(images[p]) for p in range(len(images))
+                          if p not in set(ok)]
     log("Pronto! %d pasta(s) criadas em %s" % (len(people), os.path.basename(event)))
+    log("Conferência: %d de %d fotos nas pastas" % (len(ok), len(images)))
     return event
 
 
@@ -1136,6 +1156,24 @@ YELLOW = "#ffd600"
 FG_DIM = "#b0b0b0"
 LOGO_OPACITY = 0.22         # logo de fundo bem suave para nao atrapalhar a leitura
 ROW_H = 34
+
+
+def check_text(rep):
+    """Texto da caixa de conferencia: soma das pastas x total da pasta original."""
+    if "total" not in rep:
+        return ""
+    total, placed = rep["total"], rep["placed"]
+    if rep["lost"]:
+        return ("Atenção: %d de %d fotos foram adicionadas.\n\nFicaram de fora:\n%s"
+                % (placed, total, "\n".join(rep["lost"][:20])))
+    text = "Todas as %d fotos foram adicionadas.\nNenhuma ficou de fora." % total
+    if rep["leftover"]:
+        text += ("\n\n%d foto(s) sem aluno reconhecido estão na pasta %s."
+                 % (rep["leftover"], LEFTOVER_FOLDER))
+    if rep["multi"]:
+        text += ("\n\n%d foto(s) com mais de um aluno foram para mais de uma pasta."
+                 % rep["multi"])
+    return text
 
 
 def validate_new_name(parent, old, new):
@@ -1606,7 +1644,8 @@ def run_gui():
                 elif m[0] in ("done", "error"):
                     busy(False)
                     if m[0] == "done":
-                        n = len(subdirs(m[1]))
+                        n = len([d for d in subdirs(m[1])
+                                 if os.path.basename(d) != LEFTOVER_FOLDER])
                         rep = m[2]
                         if "fichas" in rep:
                             text = ("%s criada: %d ficha(s), %d aluno(s) com fotos."
@@ -1617,11 +1656,15 @@ def run_gui():
                         else:
                             text = "%s criada com %d pessoa(s)." % (os.path.basename(m[1]), n)
                         status_var.set("Pronto! " + text.split("\n")[0])
+                        check = check_text(rep)
                         state["current"] = m[1]
                         state["sel"] = None
                         search_var.set("")
                         refresh()
                         messagebox.showinfo(APP_NAME, text)
+                        if check:
+                            (messagebox.showinfo if not rep.get("lost") else
+                             messagebox.showwarning)("Conferência das fotos", check)
                     else:
                         status_var.set("Erro: " + m[1])
                         messagebox.showerror(APP_NAME, m[1])

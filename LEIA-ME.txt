@@ -26,7 +26,13 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
   ficha, lê o nome e o código e cria uma pasta para cada aluno:
       Eventos\festa_1\alicia_ferreira_guimaraes_0101
 - Cada pasta recebe as fotos em que aquele aluno aparece. Quem não tem ficha
-  (pais, convidados) é ignorado. A foto da ficha não vai para a pasta.
+  (pais, convidados) é ignorado. A foto da ficha também vai para a pasta do
+  aluno.
+- Fotos que não são de nenhum aluno (sem rosto, convidados) vão para a pasta
+  sem_aluno, para nenhuma se perder.
+- No fim aparece a caixa "Conferência das fotos": ele conta as fotos das pastas
+  e compara com o total da pasta original ("Todas as 207 fotos foram
+  adicionadas. Nenhuma ficou de fora.").
 - As fotos tiradas logo depois da ficha (as poses do aluno, mesmo de chapéu ou
   de longe) vão para a pasta dele. As outras fotos (outro cenário, outra hora)
   vão para o aluno com o rosto mais parecido.
