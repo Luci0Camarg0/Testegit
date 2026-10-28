@@ -18,6 +18,9 @@ O QUE O PROGRAMA FAZ
   de fotos dele, dentro do programa.
 - Botão direito numa festa ou num aluno > "Renomear" (ou selecione e aperte F2).
   Digite o novo nome e aperte Enter (Esc cancela). Nomes repetidos não são aceitos.
+- Botão direito > "Deletar" (ou selecione e aperte Delete): apaga a festa, o
+  aluno ou as fotos escolhidas. Pede confirmação e manda para a Lixeira do
+  Windows, então dá para recuperar de lá.
 - Botão direito > "Criar pasta": cria uma pasta nova (uma festa, um aluno ou
   uma pasta dentro do aluno).
 
@@ -110,8 +113,9 @@ ALUNOS PELAS FICHAS (para separar só os formandos)
   aluno_1, aluno_2... como antes.
 
 ATUALIZAÇÃO AUTOMÁTICA
+- Ao abrir aparece a logo da Gala Eventos no fundo preto por uns 3 segundos.
 - Ao abrir, o programa confere na internet se há versão nova. Se houver, baixa
-  só o código (uns 80 KB) e mostra embaixo: "Versão N pronta. Clique para
+  só o código (uns 280 KB) e mostra embaixo: "Versão N pronta. Clique para
   reiniciar e usar." O .exe não precisa ser baixado de novo.
 - O código novo fica na pasta "atualizacao", ao lado da pasta "Eventos".
   Apagar essa pasta volta para a versão que veio dentro do .exe.
