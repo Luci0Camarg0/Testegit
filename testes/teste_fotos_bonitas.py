@@ -118,6 +118,25 @@ def test_boca_aberta_longe_na_sequencia_fica():
     assert out == {}, out
 
 
+def test_olho_baixo_comparado_com_o_proprio_aluno():
+    # como o Gerson (festa_2): olho normal 0.40; na 2T1A9842 olhando para baixo, 0.285
+    looks = [face(earL=0.40, earR=0.41), face(earL=0.41, earR=0.40), face(earL=0.39, earR=0.40),
+             face(earL=0.285, earR=0.285), face(earL=0.42, earR=0.41)]
+    owner = {i: "gerson_2395" for i in range(5)}
+    out = run(looks, [("gerson_2395", list(range(5)))], owner)
+    assert out == {"gerson_2395": {3}}, out
+    # sorrindo o olho fecha um pouco: fica
+    looks[3] = face(earL=0.285, earR=0.285, smileL=0.8, smileR=0.8)
+    assert run(looks, [("gerson_2395", list(range(5)))], owner) == {}
+    # aluno de olho puxado em todas as fotos: nada sai
+    looks = [face(earL=0.2, earR=0.2) for _ in range(5)]
+    assert run(looks, [("aluno_1", list(range(5)))], owner_all("aluno_1", 5)) == {}
+
+
+def owner_all(name, n):
+    return {i: name for i in range(n)}
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

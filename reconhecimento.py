@@ -32,7 +32,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 17
+VERSAO = 18
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -582,6 +582,12 @@ LOOK_AWAY = 0.55            # direcao do olhar em relacao a camera
 MOUTH_OPEN_JAW = 0.35       # boca muito aberta
 MOUTH_OPEN_RATIO = 0.35
 SAME_SHOT = 0.92            # duas fotos seguidas quase iguais (mesma pose e fundo)
+# Olho quase fechado / olhando para baixo: comparado com as outras fotos do proprio
+# aluno (cada um tem o seu olho). 2T1A9842 do Gerson: 0.70 do normal dele; as
+# outras fotos dele ficaram acima de 0.94. Sorrindo o olho fecha um pouco: nao conta.
+OWN_EYES = 0.78
+OWN_EYES_MIN_PHOTOS = 4     # precisa de fotos suficientes para saber o normal dele
+OWN_EYES_SMILE = 0.30
 
 
 def look_problem(q):
@@ -626,6 +632,15 @@ def pick_good_photos(people, owner, photo_ids, looks, minis, card_photos, reason
         judged = [p for p in ph if p not in card_photos]
         bad = {p: look_problem(q[p]) for p in judged}
         bad = {p: r for p, r in bad.items() if r}
+        ears = {p: (q[p]["earL"] + q[p]["earR"]) / 2 for p in ph if q[p] is not None}
+        if len(ears) >= OWN_EYES_MIN_PHOTOS:
+            normal = float(np.median(list(ears.values())))
+            for p in judged:
+                if p in bad or p not in ears:
+                    continue
+                smile = (q[p]["smileL"] + q[p]["smileR"]) / 2
+                if ears[p] <= OWN_EYES * normal and smile < OWN_EYES_SMILE:
+                    bad[p] = "olho quase fechado / olhando para baixo"
         for p in judged:
             if p in bad or not mouth_open(q[p]):
                 continue

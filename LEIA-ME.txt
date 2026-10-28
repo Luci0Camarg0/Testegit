@@ -38,6 +38,8 @@ FOTOS BONITAS
   fotos bonitas, e vão para a subpasta "fotos_descartadas" (dentro da pasta do
   próprio aluno) as fotos em que ELE está:
     * de olho fechado;
+    * de olho quase fechado ou olhando para baixo (comparado com as outras fotos
+      do próprio aluno, porque cada um tem o seu jeito de olho; sorrindo não conta);
     * olhando para o lado (cabeça virada com os olhos para a câmera não conta);
     * de boca muito aberta, quando existe outra foto quase igual (mesma pose,
       tirada logo antes ou depois) com a boca fechada.
