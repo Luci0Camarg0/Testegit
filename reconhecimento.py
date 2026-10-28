@@ -2122,15 +2122,14 @@ def send_to_trash(paths):
     if not paths:
         return [], []
     if sys.platform.startswith("win"):
-        import ctypes
-        from ctypes import wintypes
+        import ctypes       # sem ctypes.wintypes: os .exe antigos nao trazem
 
         class SHFILEOPSTRUCTW(ctypes.Structure):
-            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
-                        ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR),
-                        ("fFlags", ctypes.c_uint16), ("fAnyOperationsAborted", wintypes.BOOL),
+            _fields_ = [("hwnd", ctypes.c_void_p), ("wFunc", ctypes.c_uint),
+                        ("pFrom", ctypes.c_wchar_p), ("pTo", ctypes.c_wchar_p),
+                        ("fFlags", ctypes.c_uint16), ("fAnyOperationsAborted", ctypes.c_int),
                         ("hNameMappings", ctypes.c_void_p),
-                        ("lpszProgressTitle", wintypes.LPCWSTR)]
+                        ("lpszProgressTitle", ctypes.c_wchar_p)]
         done, errors = [], []
         for p in paths:         # uma por vez: o erro de uma nao para as outras
             op = SHFILEOPSTRUCTW()
