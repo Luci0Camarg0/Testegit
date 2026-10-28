@@ -35,6 +35,9 @@ jobs:
           python -m pip download --no-deps rapidocr==3.10.0 -d ocrdl
           python -c "import zipfile,glob; z=zipfile.ZipFile(glob.glob('ocrdl/rapidocr-*.whl')[0]); open('models/PP-OCRv6_rec_small.onnx','wb').write(z.read('rapidocr/models/PP-OCRv6_rec_small.onnx'))"
 
+      - name: Testar a escolha das fotos bonitas
+        run: python testes/teste_fotos_bonitas.py
+
       - name: Conferir numero da versao
         shell: pwsh
         run: |

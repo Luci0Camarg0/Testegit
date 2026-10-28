@@ -21,6 +21,35 @@ O QUE O PROGRAMA FAZ
 - Botão direito > "Criar pasta": cria uma pasta nova (uma festa, um aluno ou
   uma pasta dentro do aluno).
 
+FILA DE PASTAS (várias festas de uma vez)
+- Clique em "+ Adicionar pasta de fotos" quantas vezes quiser, mesmo com outra
+  pasta sendo processada. Cada pasta entra na fila e vira uma festa separada
+  (festa_1, festa_2...).
+- Duas pastas são processadas ao mesmo tempo; as outras esperam a vez.
+- Embaixo aparece a lista com o andamento de cada pasta. "Cancelar" tira da fila
+  (ou para a que está rodando, sem deixar festa pela metade). "Abrir" entra na
+  festa pronta. "Limpar concluídas" limpa a lista.
+- Se uma pasta der erro, as outras continuam. No fim aparece uma caixa com o
+  resultado e a conferência de cada pasta.
+- Dá para usar a galeria e renomear pastas enquanto a fila anda.
+
+FOTOS BONITAS
+- A separação dos alunos continua igual. Dentro da pasta de cada aluno ficam as
+  fotos bonitas, e vão para a subpasta "fotos_descartadas" (dentro da pasta do
+  próprio aluno) as fotos em que ELE está:
+    * de olho fechado;
+    * olhando para o lado (cabeça virada com os olhos para a câmera não conta);
+    * de boca muito aberta, quando existe outra foto quase igual (mesma pose,
+      tirada logo antes ou depois) com a boca fechada.
+- Em fotos_descartadas tem o arquivo motivos.txt dizendo por que cada foto saiu.
+  Nada é apagado: para reaproveitar, arraste a foto de volta na galeria.
+- A foto da ficha nunca é descartada, e a pasta do aluno nunca fica sem foto boa
+  (se todas forem ruins, a menos ruim fica). Rostos muito pequenos (foto de
+  longe) não são julgados. A pasta sem_aluno não é mexida.
+- Na dúvida o programa deixa a foto na pasta do aluno.
+- Quem tem o .exe antigo baixa o detector de olhos (7 MB, uma vez só). Ele usa
+  modelos do MediaPipe (Google, licença Apache 2.0).
+
 GALERIA DO ALUNO
 - Mostra as fotos em miniatura. Na primeira vez elas aparecem aos poucos;
   depois abrem na hora.

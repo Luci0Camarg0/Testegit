@@ -32,7 +32,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 16
+VERSAO = 17
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -60,6 +60,7 @@ MERGE_GROUPS = 0.42         # similaridade entre medias para juntar grupos da me
 SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ignorada (maos, pele...)
 MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pessoa e o aluno
 LEFTOVER_FOLDER = "sem_aluno"   # fotos que nao foram para nenhum aluno
+DISCARD_FOLDER = "fotos_descartadas"  # dentro do aluno: olho fechado, olhando para o lado...
 NO_ID_FOLDER = "aluno_sem_id%d"  # aluno sem ficha legivel: separado so pelo rosto
 DOUBT_SUFFIX = "_conferir"   # numero repetido em fichas de alunos diferentes
 SAME_CARD_FACE = 0.65       # duas fichas com o mesmo numero: so junta se for o mesmo rosto
@@ -73,6 +74,7 @@ FREE_GROUP = 0.55           # fotos fora da sequencia: primeiro junta as da mesm
 FREE_MATCH = 0.65           # ...e o grupo so vai para o aluno se parecer muito com ele
 FREE_MARGIN = 0.15          # ...e bem mais do que com o segundo aluno mais parecido
 NO_ID_SAME = 0.50           # fotos sem ficha: mesma pessoa para virar uma pasta aluno_sem_idN
+MAX_PARALLEL = 2            # fila de pastas: quantas pastas sao processadas ao mesmo tempo
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,26 @@ def next_numbered_name(parent, prefix):
             if m:
                 used.append(int(m.group(1)))
     return "%s_%d" % (prefix, max(used) + 1)
+
+
+_festa_lock = threading.Lock()
+
+
+def new_event_dir(parent, prefix="festa"):
+    """Cria festa_N sem repetir, mesmo com duas pastas terminando juntas."""
+    with _festa_lock:
+        os.makedirs(parent, exist_ok=True)
+        while True:
+            d = os.path.join(parent, next_numbered_name(parent, prefix))
+            try:
+                os.makedirs(d)
+                return d
+            except FileExistsError:
+                continue
+
+
+class Cancelled(Exception):
+    """A pessoa clicou em Cancelar na fila de pastas."""
 
 
 def list_images(folder):
@@ -391,12 +413,17 @@ def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
     return groups
 
 
-def scan_faces(images, engine, log=print, progress=lambda done, total, text=None: None):
+def scan_faces(images, engine, log=print, progress=lambda done, total, text=None: None,
+               extra=None):
     """
     Detecta e descreve todos os rostos. Retorna (embeddings, foto de cada
-    rosto, confianca, caixa x,y,w,h de cada rosto).
+    rosto, confianca, caixa x,y,w,h de cada rosto). Com extra={} guarda tambem
+    como cada rosto esta (olhos, boca, virado) e uma miniatura de cada foto,
+    usados para separar as fotos bonitas.
     """
     embs, photo_ids, scores, boxes = [], [], [], []
+    looks = extra.setdefault("looks", []) if extra is not None else None
+    minis = extra.setdefault("minis", {}) if extra is not None else None
     total = len(images)
     for i, path in enumerate(images):
         img = read_image(path)
@@ -415,11 +442,209 @@ def scan_faces(images, engine, log=print, progress=lambda done, total, text=None
             photo_ids.append(i)
             scores.append(float(f[14]))
             boxes.append([float(v) for v in f[:4]])
+            if looks is not None:
+                looks.append(face_look(img, f) if f[14] >= SURE_FACE else None)
             kept += 1
+        if minis is not None:
+            minis[i] = photo_mini(img)
         log("%s: %d rosto(s)" % (os.path.basename(path), kept))
         progress(i + 1, total, "Analisando fotos...")
     return (np.array(embs, np.float32).reshape(-1, 128), np.array(photo_ids, int),
             np.array(scores), np.array(boxes, np.float32).reshape(-1, 4))
+
+
+# ---------------------------------------------------------------------------
+# Fotos bonitas (olhos abertos, olhando para a camera)
+# ---------------------------------------------------------------------------
+# Modelos do MediaPipe (Google, licenca Apache 2.0) convertidos para ONNX: 478
+# pontos do rosto e, a partir deles, quanto cada olho esta fechado, a boca
+# aberta e para onde os olhos olham. Vao dentro do .exe novo; quem tem o .exe
+# antigo baixa uma vez (7 MB) para a pasta "atualizacao".
+LOOK_MODELS = ("face_landmarks_detector.onnx", "face_blendshapes.onnx")
+LOOK_MIN_PX = 70            # rosto menor que isso (foto de longe): nao da para julgar, fica
+# indices dos 146 pontos que o modelo de expressoes usa (iguais aos do MediaPipe)
+LOOK_POINTS = [0, 1, 4, 5, 6, 7, 8, 10, 13, 14, 17, 21, 33, 37, 39, 40, 46, 52, 53, 54, 55,
+               58, 61, 63, 65, 66, 67, 70, 78, 80, 81, 82, 84, 87, 88, 91, 93, 95, 103, 105,
+               107, 109, 127, 132, 133, 136, 144, 145, 146, 148, 149, 150, 152, 153, 154,
+               155, 157, 158, 159, 160, 161, 162, 163, 168, 172, 173, 176, 178, 181, 185,
+               191, 195, 197, 234, 246, 249, 251, 263, 267, 269, 270, 276, 282, 283, 284,
+               285, 288, 291, 293, 295, 296, 297, 300, 308, 310, 311, 312, 314, 317, 318,
+               321, 323, 324, 332, 334, 336, 338, 356, 361, 362, 365, 373, 374, 375, 377,
+               378, 379, 380, 381, 382, 384, 385, 386, 387, 388, 389, 390, 397, 398, 400,
+               402, 405, 409, 415, 454, 466, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477]
+LOOK_SHAPES = {"blinkL": 9, "blinkR": 10, "inL": 13, "inR": 14, "outL": 15, "outR": 16,
+               "squintL": 19, "squintR": 20, "jaw": 25, "smileL": 44, "smileR": 45}
+
+_look = {"models": None, "tried": False}
+_look_lock = threading.Lock()
+
+
+def look_models(log=print, download=True):
+    """Os dois modelos (pontos e expressoes) ou None se nao tiver como usar."""
+    with _look_lock:
+        if _look["models"] is not None or _look["tried"]:
+            return _look["models"]
+        dl = os.path.join(os.path.dirname(data_dir()), "atualizacao", "modelos")
+        paths = []
+        for name in LOOK_MODELS:
+            found = None
+            for d in (os.path.join(resource_dir(), "assets"), os.path.join(app_dir(), "assets"),
+                      os.path.join(resource_dir(), "models"), dl):
+                p = os.path.join(d, name)
+                if os.path.isfile(p) and os.path.getsize(p) > 100000:
+                    found = p
+                    break
+            if found is None and download:
+                try:
+                    log("Baixando o detector de olhos fechados (só desta vez)...")
+                    data = _get(UPDATE_BASE + "assets/" + name, timeout=120)
+                    if len(data) > 100000:
+                        os.makedirs(dl, exist_ok=True)
+                        found = os.path.join(dl, name)
+                        with open(found + ".tmp", "wb") as f:
+                            f.write(data)
+                        os.replace(found + ".tmp", found)
+                except Exception:
+                    found = None
+            paths.append(found)
+        if None in paths:
+            if download:
+                _look["tried"] = True
+            return None
+        try:
+            import onnxruntime as ort
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = 2
+            _look["models"] = [ort.InferenceSession(p, opts, providers=["CPUExecutionProvider"])
+                               for p in paths]
+        except Exception:
+            _look["models"] = None
+        _look["tried"] = True
+        return _look["models"]
+
+
+def face_look(img, f):
+    """
+    Como o rosto esta na foto: olhos (0 aberto .. 1 fechado), boca, para onde
+    a cabeca e os olhos apontam. None se o rosto for pequeno demais ou sem
+    modelo.
+    """
+    if f[2] < LOOK_MIN_PX:
+        return None
+    models = _look["models"] if _look["tried"] else look_models(download=False)
+    if not models:
+        return None
+    x, y, w, h = [float(v) for v in f[:4]]
+    reye, leye = f[4:6], f[6:8]
+    ang = float(np.degrees(np.arctan2(leye[1] - reye[1], leye[0] - reye[0])))
+    c = (x + w / 2, y + h / 2)
+    M = cv2.getRotationMatrix2D(c, ang, 256.0 / (max(w, h) * 1.5))
+    M[:, 2] += (128 - c[0], 128 - c[1])
+    crop = cv2.warpAffine(img, M, (256, 256), flags=cv2.INTER_LINEAR)
+    inp = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).astype(np.float32)[None] / 255.0
+    try:
+        lm_model, bs_model = models
+        P = lm_model.run(None, {lm_model.get_inputs()[0].name: inp})[0].reshape(478, 3)
+        bs = bs_model.run(None, {bs_model.get_inputs()[0].name:
+                                 P[LOOK_POINTS, :2][None].astype(np.float32)})[0].ravel()
+    except Exception:
+        return None
+
+    def dist(a, b):
+        return float(np.linalg.norm(P[a, :2] - P[b, :2])) + 1e-6
+    out = {k: float(bs[i]) for k, i in LOOK_SHAPES.items()}
+    # abertura dos olhos medida nos pontos (altura / largura de cada olho)
+    out["earL"] = (dist(159, 145) + dist(158, 153) + dist(160, 144)) / 3 / dist(33, 133)
+    out["earR"] = (dist(386, 374) + dist(385, 380) + dist(387, 373)) / 3 / dist(362, 263)
+    out["mouth"] = dist(13, 14) / dist(61, 291)
+    # cabeca virada: nariz em relacao ao meio das bochechas (-1 .. 1)
+    mid = (P[234, 0] + P[454, 0]) / 2
+    out["turn"] = float((P[1, 0] - mid) / (abs(P[454, 0] - P[234, 0]) / 2 + 1e-6))
+    return out
+
+
+def photo_mini(img):
+    """Miniatura cinza da foto inteira: duas fotos quase iguais tem a mesma."""
+    m = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (32, 24), interpolation=cv2.INTER_AREA)
+    m = m.astype(np.float32).ravel()
+    m -= m.mean()
+    return m / (np.linalg.norm(m) + 1e-6)
+
+
+# limites medidos nas fotos reais (estudio e festa, criancas e formandos)
+# Medido em 650 rostos das pastas Manha, 1 Ano e 2 Ano A: olho fechado de verdade
+# ficou acima de 0.45; sorriso de olho apertado chega a 0.39, mas com "apertado"
+# alto. Olhando para o lado: |olhos + 2 x cabeca| acima de 0.6; olhando para a
+# camera (mesmo de cabeca virada, os olhos compensam) ficou ate 0.31.
+EYES_CLOSED_BLINK = 0.42    # quanto o modelo acha que os dois olhos estao fechados
+EYES_CLOSED_SQUINT = 0.10   # ...e bem mais "fechado" do que "apertado" (sorriso)
+LOOK_AWAY = 0.55            # direcao do olhar em relacao a camera
+MOUTH_OPEN_JAW = 0.35       # boca muito aberta
+MOUTH_OPEN_RATIO = 0.35
+SAME_SHOT = 0.92            # duas fotos seguidas quase iguais (mesma pose e fundo)
+
+
+def look_problem(q):
+    """Motivo para descartar a foto pelo rosto do aluno, ou ''."""
+    if q is None:
+        return ""
+    blink = (q["blinkL"] + q["blinkR"]) / 2
+    squint = (q["squintL"] + q["squintR"]) / 2
+    if blink >= EYES_CLOSED_BLINK and blink - squint >= EYES_CLOSED_SQUINT:
+        return "olho fechado"
+    # para onde olha: olhos dentro do rosto + quanto a cabeca esta virada
+    # (cabeca virada com os olhos voltados para a camera da quase zero)
+    eyes = ((q["outL"] + q["inR"]) - (q["inL"] + q["outR"])) / 2
+    if abs(eyes + 2 * q["turn"]) >= LOOK_AWAY:
+        return "olhando para o lado"
+    return ""
+
+
+def mouth_open(q):
+    return q is not None and (q["jaw"] >= MOUTH_OPEN_JAW or q["mouth"] >= MOUTH_OPEN_RATIO)
+
+
+def pick_good_photos(people, owner, photo_ids, looks, minis, card_photos, reasons=None):
+    """
+    Escolhe, em cada pasta de aluno, as fotos que vao para fotos_descartadas:
+    olho fechado ou olhando para o lado (olhando so o rosto daquele aluno), e
+    boca muito aberta quando existe uma foto quase igual com a boca fechada.
+    A separacao dos alunos nao muda. A foto da ficha nunca e descartada, e a
+    pasta nunca fica sem nenhuma foto boa. Retorna {pasta: {fotos}}.
+    """
+    faces = {}
+    for k, ph in enumerate(photo_ids):
+        faces.setdefault(int(ph), []).append(k)
+    out = {}
+    for folder, ph in people:
+        if folder == LEFTOVER_FOLDER:
+            continue
+        q = {}
+        for p in ph:
+            ks = [k for k in faces.get(p, []) if owner.get(k) == folder]
+            q[p] = looks[ks[0]] if ks and ks[0] < len(looks) else None
+        judged = [p for p in ph if p not in card_photos]
+        bad = {p: look_problem(q[p]) for p in judged}
+        bad = {p: r for p, r in bad.items() if r}
+        for p in judged:
+            if p in bad or not mouth_open(q[p]):
+                continue
+            for o in judged:
+                if o != p and abs(o - p) <= 3 and o not in bad and q[o] is not None and \
+                        not mouth_open(q[o]) and p in minis and o in minis and \
+                        float(minis[p] @ minis[o]) >= SAME_SHOT:
+                    bad[p] = "boca aberta (tem uma igual de boca fechada)"
+                    break
+        if judged and len(bad) == len(judged) and not set(ph) & set(card_photos):
+            # todas ruins: a menos ruim fica, para a pasta nao ficar vazia
+            keep = min(bad, key=lambda p: (q[p] or {}).get("blinkL", 0) +
+                       (q[p] or {}).get("blinkR", 0))
+            del bad[keep]
+        if bad:
+            out[folder] = set(bad)
+            if reasons is not None:
+                reasons[folder] = bad
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +712,7 @@ def group_cards(embs, cards):
     return out
 
 
-def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
+def assign_by_cards(embs, photo_ids, scores, cards, n_photos, owners=None):
     """
     Separa as fotos pelos alunos das fichas, sem agrupar todo mundo antes.
     1. Sequencia: as fotos logo depois da ficha sao do mesmo aluno enquanto o
@@ -501,7 +726,8 @@ def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
        de outro e pior que uma pasta a mais.
     3. Foto sozinha de um rosto (de lado, com sombra) colada nas fotos de um
        aluno ou muito mais parecida com ele do que com qualquer outro.
-    cards: {foto: (nome, codigo, rosto)}. Retorna {pasta: [fotos]}.
+    cards: {foto: (nome, codigo, rosto)}. Retorna {pasta: [fotos]}. Em
+    owners (se dado) fica de quem e cada rosto.
     """
     X = np.asarray(embs, np.float32)
     photo_ids = np.asarray(photo_ids)
@@ -604,6 +830,8 @@ def assign_by_cards(embs, photo_ids, scores, cards, n_photos):
             continue
         if n not in taken:
             give(k, n, ref=False)
+    if owners is not None:
+        owners.update(owner)
     # a foto da ficha vai so para a pasta do proprio aluno
     return {n: sorted((photos[n] - set(cards)) | set(first[n])) for n in names}
 
@@ -635,6 +863,7 @@ HAND_MODEL = "PP-OCRv6_rec_small.onnx"
 HAND_URL = "https://github.com/Luci0Camarg0/Testegit/releases/download/modelos/" + HAND_MODEL
 
 _ocr = None
+_ocr_lock = threading.RLock()   # o leitor de fichas e um so: uma pasta por vez usa
 
 
 def hand_model(log=print, download=True):
@@ -1426,7 +1655,8 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
     cands = sorted(ph for ph, ks in sure.items() if len(ks) <= 3)
     cards, maybe, gala_codes = {}, [], []
     if cands:
-        get_ocr(log)
+        with _ocr_lock:
+            get_ocr(log)
     for n, ph in enumerate(cands):
         progress(n + 1, len(cands), "Procurando fichas...")
         ks = sure[ph]
@@ -1438,7 +1668,8 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
         if img is None:
             continue
         try:
-            name, code, gala, number = read_card_photo(img, boxes[k])
+            with _ocr_lock:
+                name, code, gala, number = read_card_photo(img, boxes[k])
         except Exception as e:
             log("Leitor de fichas falhou: %s" % e)
             break
@@ -1484,7 +1715,7 @@ def find_cards(images, photo_ids, scores, boxes, log=print,
 # ---------------------------------------------------------------------------
 
 def process_folder(src, engine, log=print, progress=lambda done, total, text=None: None,
-                   out_root=None, report=None):
+                   out_root=None, report=None, cancel=None):
     """
     Processa uma pasta de fotos e cria festa_N. Se no meio das fotos houver
     fotos de ficha (aluno segurando nome e codigo), cria uma pasta para cada
@@ -1493,20 +1724,30 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
     Retorna o caminho criado.
     """
     out_root = out_root or data_dir()
+    user_progress = progress
+
+    def progress(done, total, text=None):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        user_progress(done, total, text)
+
     images = list_images(src)
     if not images:
         raise RuntimeError("Nenhuma foto encontrada nessa pasta.")
 
-    embs, photo_ids, scores, boxes = scan_faces(images, engine, log, progress)
+    extra = {}
+    look_models(log)                 # detector de olhos fechados (baixa uma vez)
+    embs, photo_ids, scores, boxes = scan_faces(images, engine, log, progress, extra)
     if not len(embs):
         raise RuntimeError("Nenhum rosto encontrado nas fotos.")
 
     log("Procurando fotos de ficha...")
     cards = find_cards(images, photo_ids, scores, boxes, log, progress)
+    owner = {}                       # rosto -> pasta (para olhar so o rosto do aluno)
 
     if cards:
         log("Separando os alunos das %d ficha(s)..." % len(cards))
-        found = assign_by_cards(embs, photo_ids, scores, cards, len(images))
+        found = assign_by_cards(embs, photo_ids, scores, cards, len(images), owner)
         people = [(n, ph) for n, ph in found.items() if ph]
         missing = [n for n, ph in found.items() if not set(ph) - set(cards)]
         if report is not None:
@@ -1522,9 +1763,12 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
         if not groups:
             raise RuntimeError("Nenhum rosto encontrado nas fotos.")
         # mais fotos primeiro (aluno_1 = quem mais aparece)
-        phs = sorted([sorted({int(photo_ids[k]) for k in g}) for g in groups],
-                     key=lambda ph: (-len(ph), ph[0]))
-        people = [("aluno_%d" % i, ph) for i, ph in enumerate(phs, 1)]
+        groups = sorted(groups, key=lambda g: (-len({int(photo_ids[k]) for k in g}),
+                                               min(int(photo_ids[k]) for k in g)))
+        people = []
+        for i, g in enumerate(groups, 1):
+            people.append(("aluno_%d" % i, sorted({int(photo_ids[k]) for k in g})))
+            owner.update({k: "aluno_%d" % i for k in g})
 
     # fotos que nao foram para nenhum aluno (sem rosto, outras pessoas) nao se
     # perdem: vao para uma pasta separada
@@ -1546,6 +1790,8 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
                     continue
                 while NO_ID_FOLDER % n in used:
                     n += 1
+                grp = next(g for g in sub if sorted({int(photo_ids[ks[j]]) for j in g}) == ph)
+                owner.update({ks[j]: NO_ID_FOLDER % n for j in grp})
                 people.append((NO_ID_FOLDER % n, ph))
                 used.add(NO_ID_FOLDER % n)
                 log("Sem ficha, separado pelo rosto: %s (%d fotos)" % (NO_ID_FOLDER % n, len(ph)))
@@ -1554,24 +1800,56 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
     if rest:
         people.append((LEFTOVER_FOLDER, rest))
 
-    event = os.path.join(out_root, next_numbered_name(out_root, "festa"))
-    os.makedirs(event)
+    # fotos bonitas: a separacao dos alunos nao muda; dentro da pasta de cada
+    # aluno, foto com olho fechado / olhando para o lado (ou de boca aberta
+    # tendo outra igual de boca fechada) vai para a subpasta fotos_descartadas
+    discard, why = {}, {}
+    if extra.get("looks") and any(v is not None for v in extra["looks"]):
+        log("Escolhendo as fotos bonitas...")
+        discard = pick_good_photos(people, owner, photo_ids, extra["looks"],
+                                   extra.get("minis", {}), set(cards), why)
+        for folder, items in why.items():
+            for p, r in sorted(items.items()):
+                log("Descartada: %s/%s (%s)" % (folder, os.path.basename(images[p]), r))
+    if report is not None:
+        report["descartadas"] = sum(len(v) for v in discard.values())
+
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+    event = new_event_dir(out_root)
+    if report is not None:
+        report["event"] = event
     copied = {}                      # foto de origem -> arquivos criados
-    for folder, ph in people:
-        d = os.path.join(event, folder)
-        os.makedirs(d)
-        used = set()
-        for p in ph:
-            name = os.path.basename(images[p])
-            base, ext = os.path.splitext(name)
-            k = 2
-            while name.lower() in used:     # fotos com mesmo nome em subpastas
-                name = "%s_%d%s" % (base, k, ext)
-                k += 1
-            used.add(name.lower())
-            dst = os.path.join(d, name)
-            shutil.copy2(images[p], dst)
-            copied.setdefault(p, []).append(dst)
+    try:
+        for folder, ph in people:
+            d = os.path.join(event, folder)
+            os.makedirs(d)
+            used = set()
+            bad = discard.get(folder, set())
+            for p in ph:
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled()
+                name = os.path.basename(images[p])
+                base, ext = os.path.splitext(name)
+                k = 2
+                while name.lower() in used:     # fotos com mesmo nome em subpastas
+                    name = "%s_%d%s" % (base, k, ext)
+                    k += 1
+                used.add(name.lower())
+                if p in bad:
+                    os.makedirs(os.path.join(d, DISCARD_FOLDER), exist_ok=True)
+                    dst = os.path.join(d, DISCARD_FOLDER, name)
+                else:
+                    dst = os.path.join(d, name)
+                shutil.copy2(images[p], dst)
+                copied.setdefault(p, []).append(dst)
+                if p in bad:
+                    with open(os.path.join(d, DISCARD_FOLDER, "motivos.txt"), "a",
+                              encoding="utf-8") as f:
+                        f.write("%s: %s\n" % (name, why.get(folder, {}).get(p, "")))
+    except BaseException:
+        shutil.rmtree(event, ignore_errors=True)    # festa pela metade nao fica
+        raise
 
     # conferencia: cada foto da pasta original tem que estar em alguma pasta
     ok = [p for p in range(len(images)) if any(os.path.isfile(f) for f in copied.get(p, ()))]
@@ -1851,7 +2129,7 @@ def run_gui(test=None):
     test_errors = []
     win.report_callback_exception = report_error
     win.title("%s  —  versão %d" % (APP_NAME, VERSAO))
-    win.geometry("820x600")
+    win.geometry("820x640")
     win.minsize(560, 420)
     win.configure(bg=BG)
     try:
@@ -1914,7 +2192,7 @@ def run_gui(test=None):
     mid = tk.Frame(win, bg=BG, padx=12)
     mid.pack(fill="both", expand=True)
     canvas = tk.Canvas(mid, bg=BG, highlightthickness=1, highlightbackground="#2a2a2a", bd=0,
-                       yscrollincrement=ROW_H)
+                       yscrollincrement=ROW_H, height=120)   # cresce; deixa lugar para a fila
     sb = ttk.Scrollbar(mid, orient="vertical", command=canvas.yview,
                        style="Dark.Vertical.TScrollbar")
     canvas.configure(yscrollcommand=lambda a, b: (sb.set(a, b), place_logo()))
@@ -1934,7 +2212,7 @@ def run_gui(test=None):
                          selectforeground=FG, activestyle="none", exportselection=False)
     targets.pack(fill="both", expand=True, pady=(6, 0))
     gcan = tk.Canvas(gal, bg=BG, highlightthickness=1, highlightbackground="#2a2a2a", bd=0,
-                     yscrollincrement=40)
+                     yscrollincrement=40, height=120)
     gsb = ttk.Scrollbar(gal, orient="vertical", command=gcan.yview,
                         style="Dark.Vertical.TScrollbar")
     gcan.configure(yscrollcommand=gsb.set)
@@ -2189,7 +2467,7 @@ def run_gui(test=None):
                 rename_dialog(sel[0])
             return
         path = path or state["sel"]
-        if not path or state["busy"]:
+        if not path or path in busy_paths():
             return
         paths = [r[0] for r in state["rows"]]
         if path not in paths:
@@ -2275,8 +2553,7 @@ def run_gui(test=None):
 
     def busy(on):
         state["busy"] = on
-        add_btn.configure(state="disabled" if on else "normal")
-        if on:
+        if not on:
             prog["value"] = 0
 
     # --- galeria ------------------------------------------------------------
@@ -2678,8 +2955,6 @@ def run_gui(test=None):
         return out["v"]
 
     def new_folder(parent, then_move=None):
-        if state["busy"] and parent == root_dir:
-            return
         name = "nova_pasta"
         while True:
             name = ask_name("Nome da nova pasta", name)
@@ -2843,77 +3118,304 @@ def run_gui(test=None):
         update_lbl.bind("<Button-1>", go)
         update_lbl.pack(side="right")
 
-    # --- processamento ------------------------------------------------------
-    def worker(folder):
+    # --- processamento (fila de pastas) --------------------------------------
+    # Cada pasta escolhida entra na fila e vira um evento (festa_N). Duas pastas
+    # sao processadas ao mesmo tempo; as outras esperam. Erro numa pasta nao
+    # para as outras.
+    jobs = []                       # na ordem em que foram escolhidas
+    engines = []                    # motores de rosto livres (um por pasta rodando)
+    engines_lock = threading.Lock()
+    finished = []                   # terminaram desde a ultima caixa de resumo
+    jobs_box = tk.Frame(bottom, bg=BG)
+    jobs_head = tk.Frame(jobs_box, bg=BG)
+    jobs_head.pack(fill="x")
+    jobs_title = tk.Label(jobs_head, text="", bg=BG, fg=FG, font=font_b, anchor="w")
+    jobs_title.pack(side="left")
+    clear_btn = tk.Label(jobs_head, text="Limpar concluídas", bg=BG, fg=ACCENT_HOVER,
+                         font=("Segoe UI", 9, "underline"), cursor="hand2")
+    jobs_rows = tk.Frame(jobs_box, bg=BG)
+    jobs_rows.pack(fill="x", pady=(4, 6))
+    JOB_TEXT = {"espera": "Esperando na fila", "rodando": "Começando...",
+                "pronto": "Pronto", "erro": "Erro", "cancelado": "Cancelado"}
+    JOB_COLOR = {"espera": FG_DIM, "rodando": FG, "pronto": "#66bb6a", "erro": ACCENT_HOVER,
+                 "cancelado": FG_DIM}
+
+    def running():
+        return [j for j in jobs if j["state"] in ("espera", "rodando")]
+
+    def busy_paths():
+        return {j["live"].get("event") for j in jobs if j["state"] == "rodando"} - {None}
+
+    def get_engine(log):
+        with engines_lock:
+            if engines:
+                return engines.pop()
+        log("Carregando modelos de reconhecimento...")
+        return FaceEngine(log)      # cada pasta rodando tem o seu (nao e seguro dividir)
+
+    def worker(job):
+        jid = job["id"]
+
         def log(m):
-            msgs.put(("status", m))
+            msgs.put(("status", jid, m))
+        engine = None
         try:
-            if state["engine"] is None:
-                log("Carregando modelos de reconhecimento...")
-                state["engine"] = FaceEngine(log)
-            report = {}
-            ev = process_folder(folder, state["engine"], log,
-                                lambda d, t, txt=None: msgs.put(("prog", d, t, txt)),
-                                root_dir, report=report)
-            msgs.put(("done", ev, report))
+            engine = get_engine(log)
+            report = job["live"]
+            ev = process_folder(job["folder"], engine, log,
+                                lambda d, t, txt=None: msgs.put(("prog", jid, d, t, txt)),
+                                root_dir, report=report, cancel=job["cancel"])
+            msgs.put(("done", jid, ev, report))
+        except Cancelled:
+            msgs.put(("cancelado", jid))
         except Exception as e:  # mostra qualquer erro ao usuario
-            msgs.put(("error", str(e)))
+            if not isinstance(e, RuntimeError):     # RuntimeError = aviso nosso
+                log_error("Pasta %s:\n%s" % (job["folder"], traceback.format_exc()))
+            msgs.put(("error", jid, str(e) or type(e).__name__))
+        finally:
+            if engine is not None:
+                with engines_lock:
+                    engines.append(engine)
+
+    def start_jobs():
+        active = [j for j in jobs if j["state"] == "rodando"]
+        for j in jobs:
+            if len(active) >= MAX_PARALLEL:
+                break
+            if j["state"] == "espera":
+                j["state"] = "rodando"
+                j["text"] = JOB_TEXT["rodando"]
+                active.append(j)
+                threading.Thread(target=worker, args=(j,), daemon=True).start()
+        busy(bool(running()))
+        draw_jobs()
+
+    def cancel_job(j):
+        if j["state"] == "espera":
+            j["state"] = "cancelado"
+            j["text"] = "Cancelado (não começou)"
+            finished.append(j)
+            start_jobs()
+            if not running():
+                show_summary()
+        elif j["state"] == "rodando":
+            j["cancel"].set()
+            j["text"] = "Cancelando..."
+            draw_jobs()
+
+    def open_job(j):
+        if j.get("event") and os.path.isdir(j["event"]):
+            enter(j["event"])
+
+    def clear_jobs(_e=None):
+        jobs[:] = [j for j in jobs if j["state"] in ("espera", "rodando")]
+        draw_jobs()
+
+    def draw_jobs():
+        for w in jobs_rows.winfo_children():
+            w.destroy()
+        if not jobs:
+            jobs_box.pack_forget()
+            return
+        if not jobs_box.winfo_ismapped():
+            jobs_box.pack(fill="x", before=prog)
+        n_run = len([j for j in jobs if j["state"] == "rodando"])
+        n_wait = len([j for j in jobs if j["state"] == "espera"])
+        title = "Fila de pastas"
+        if n_run or n_wait:
+            title += ":  %d processando, %d esperando" % (n_run, n_wait)
+        jobs_title.configure(text=title)
+        if len(running()) < len(jobs):
+            clear_btn.pack(side="right")
+        else:
+            clear_btn.pack_forget()
+        shown = [j for j in jobs if j["state"] == "rodando"] + \
+            [j for j in jobs if j["state"] == "espera"] + \
+            [j for j in jobs if j["state"] not in ("rodando", "espera")][::-1]
+        extra_n = max(0, len(shown) - 5)
+        shown = sorted(shown[:5], key=jobs.index)
+        if extra_n:
+            tk.Label(jobs_rows, text="... e mais %d pasta(s)" % extra_n, bg=BG, fg=FG_DIM,
+                     font=("Segoe UI", 9), anchor="w").pack(side="bottom", fill="x")
+        for j in shown:
+            row = tk.Frame(jobs_rows, bg=PANEL, padx=8, pady=4)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=short(os.path.basename(j["folder"]) or j["folder"], 26),
+                     width=26, anchor="w", bg=PANEL, fg=FG,
+                     font=("Segoe UI", 10, "bold")).pack(side="left")
+            if j["state"] == "rodando":
+                bar = ttk.Progressbar(row, mode="determinate", length=140,
+                                      style="Dark.Horizontal.TProgressbar",
+                                      maximum=max(1, j["total"]), value=j["done"])
+                bar.pack(side="left", padx=(0, 8))
+                j["bar"] = bar
+            lbl = tk.Label(row, text=j["text"], anchor="w", bg=PANEL,
+                           fg=JOB_COLOR[j["state"]], font=("Segoe UI", 9))
+            lbl.pack(side="left", fill="x", expand=True)
+            j["label"] = lbl
+            if j["state"] in ("espera", "rodando"):
+                b = tk.Label(row, text="Cancelar", bg=PANEL, fg=YELLOW, cursor="hand2",
+                             font=("Segoe UI", 9, "underline"))
+                b.bind("<Button-1>", lambda e, j=j: cancel_job(j))
+                b.pack(side="right")
+            elif j["state"] == "pronto":
+                b = tk.Label(row, text="Abrir", bg=PANEL, fg=YELLOW, cursor="hand2",
+                             font=("Segoe UI", 9, "underline"))
+                b.bind("<Button-1>", lambda e, j=j: open_job(j))
+                b.pack(side="right")
+
+    def job_by_id(jid):
+        for j in jobs:
+            if j["id"] == jid:
+                return j
+        return None
+
+    def add_job(folder):
+        folder = os.path.normpath(folder)
+        if any(os.path.normcase(j["folder"]) == os.path.normcase(folder)
+               for j in running()):
+            if not test:
+                messagebox.showinfo(APP_NAME, "Essa pasta já está na fila.", parent=win)
+            return None
+        state["job_n"] = state.get("job_n", 0) + 1
+        j = {"id": state["job_n"], "folder": folder, "state": "espera",
+             "text": JOB_TEXT["espera"], "cancel": threading.Event(), "done": 0, "total": 1, "live": {}}
+        jobs.append(j)
+        start_jobs()
+        return j
 
     def add_folder():
-        if state["busy"]:
-            return
-        folder = filedialog.askdirectory(title="Escolha a pasta com as fotos da festa")
+        folder = filedialog.askdirectory(title="Escolha a pasta com as fotos da festa "
+                                               "(pode escolher outra depois, ela entra na fila)")
         if not folder:
             return
-        busy(True)
-        threading.Thread(target=worker, args=(folder,), daemon=True).start()
+        add_job(folder)
+
+    def result_text(j):
+        rep, ev = j["report"], j["event"]
+        n = len([d for d in subdirs(ev) if os.path.basename(d) != LEFTOVER_FOLDER])
+        if "fichas" in rep:
+            text = ("%s criada: %d ficha(s), %d aluno(s) com fotos."
+                    % (os.path.basename(ev), rep["fichas"], n))
+        else:
+            text = "%s criada com %d pessoa(s)." % (os.path.basename(ev), n)
+        if rep.get("descartadas"):
+            text += (" %d foto(s) com olho fechado ou olhando para o lado foram para "
+                     "%s, dentro da pasta de cada aluno." % (rep["descartadas"], DISCARD_FOLDER))
+        return text
+
+    def show_summary():
+        """Quando a fila termina: uma caixa com o resultado de cada pasta."""
+        done = list(finished)
+        finished[:] = []
+        if not done:
+            return
+        if test:
+            state["summary"] = [(j["folder"], j["state"]) for j in done]
+            return
+        ok = [j for j in done if j["state"] == "pronto"]
+        if len(done) == 1 and ok:
+            j = ok[0]
+            state["current"] = j["event"]
+            state["sel"] = None
+            search_var.set("")
+            refresh()
+            text = result_text(j)
+            if j["report"].get("missing"):
+                text += "\n\nNão apareceram em outras fotos:\n" + \
+                        "\n".join(j["report"]["missing"][:30])
+            messagebox.showinfo(APP_NAME, text)
+            check = check_text(j["report"])
+            if check:
+                (messagebox.showinfo if not j["report"].get("lost") else
+                 messagebox.showwarning)("Conferência das fotos", check)
+            return
+        refresh()
+        parts, warn = [], False
+        for j in done:
+            name = os.path.basename(j["folder"]) or j["folder"]
+            if j["state"] == "pronto":
+                parts.append("%s:\n%s\n%s" % (name, result_text(j), check_text(j["report"])))
+                warn = warn or bool(j["report"].get("lost"))
+            elif j["state"] == "erro":
+                parts.append("%s:\nErro: %s" % (name, j["error"]))
+                warn = True
+            else:
+                parts.append("%s:\nCancelada." % name)
+        (messagebox.showwarning if warn else messagebox.showinfo)(
+            "Fila de pastas: %d pasta(s) terminadas" % len(done), "\n\n".join(parts))
 
     def poll():
         try:
             while True:
                 m = msgs.get_nowait()
                 if m[0] == "status":
-                    status_var.set(m[1])
+                    j = job_by_id(m[1])
+                    if j is not None and j["state"] == "rodando" and not j["cancel"].is_set():
+                        j["text"] = m[2]
+                        if j.get("label"):
+                            j["label"].configure(text=m[2])
+                    status_var.set(m[2])
                 elif m[0] == "prog":
-                    prog["maximum"] = m[2]
-                    prog["value"] = m[1]
-                    status_var.set("%s %d de %d" % (m[3] or "Analisando fotos...", m[1], m[2]))
+                    j = job_by_id(m[1])
+                    if j is not None and j["state"] == "rodando":
+                        j["done"], j["total"] = m[2], m[3]
+                        if not j["cancel"].is_set():
+                            j["text"] = "%s %d de %d" % (m[4] or "Analisando fotos...", m[2], m[3])
+                        if j.get("label"):
+                            j["label"].configure(text=j["text"])
+                        if j.get("bar"):
+                            j["bar"].configure(maximum=max(1, m[3]), value=m[2])
+                    act = [x for x in jobs if x["state"] == "rodando"]
+                    prog["maximum"] = 100
+                    prog["value"] = 100.0 * sum(x["done"] / max(1, x["total"]) for x in act) \
+                        / max(1, len(act))
+                    status_var.set(j["text"] if j is not None else "")
                 elif m[0] == "update":
                     show_update(m[1])
                 elif m[0] == "thumb":
                     got_thumb(m[1], m[2])
-                elif m[0] in ("done", "error"):
-                    busy(False)
+                elif m[0] in ("done", "error", "cancelado"):
+                    j = job_by_id(m[1])
+                    if j is None:
+                        continue
                     if m[0] == "done":
-                        n = len([d for d in subdirs(m[1])
-                                 if os.path.basename(d) != LEFTOVER_FOLDER])
-                        rep = m[2]
-                        if "fichas" in rep:
-                            text = ("%s criada: %d ficha(s), %d aluno(s) com fotos."
-                                    % (os.path.basename(m[1]), rep["fichas"], n))
-                            if rep["missing"]:
-                                text += "\n\nNão apareceram em outras fotos:\n" + \
-                                        "\n".join(rep["missing"][:30])
-                        else:
-                            text = "%s criada com %d pessoa(s)." % (os.path.basename(m[1]), n)
-                        status_var.set("Pronto! " + text.split("\n")[0])
-                        check = check_text(rep)
-                        state["current"] = m[1]
-                        state["sel"] = None
-                        search_var.set("")
-                        refresh()
-                        messagebox.showinfo(APP_NAME, text)
-                        if check:
-                            (messagebox.showinfo if not rep.get("lost") else
-                             messagebox.showwarning)("Conferência das fotos", check)
+                        j["state"], j["event"], j["report"] = "pronto", m[2], m[3]
+                        j["text"] = result_text(j).split(" criada")[0] + " criada. " + \
+                            (check_text(m[3]).split("\n")[0] if check_text(m[3]) else "")
+                        if m[3].get("descartadas"):
+                            j["text"] += "  %d descartada(s)." % m[3]["descartadas"]
+                    elif m[0] == "error":
+                        j["state"], j["error"] = "erro", m[2]
+                        j["text"] = "Erro: " + m[2]
                     else:
-                        status_var.set("Erro: " + m[1])
-                        messagebox.showerror(APP_NAME, m[1])
+                        j["state"], j["text"] = "cancelado", "Cancelado"
+                    finished.append(j)
+                    start_jobs()
+                    if not in_gallery():
+                        refresh()
+                    if not running():
+                        status_var.set("Fila terminada.")
+                        show_summary()
         except queue.Empty:
             pass
         win.after(100, poll)
 
     add_btn.configure(command=add_folder)
+    clear_btn.bind("<Button-1>", clear_jobs)
+
+    def on_close():
+        if running() and not messagebox.askyesno(
+                APP_NAME, "Ainda há pastas na fila sendo processadas.\n"
+                "Fechar mesmo assim? As que não terminaram não serão salvas.", parent=win):
+            return
+        for j in running():
+            j["cancel"].set()
+            ev = j["live"].get("event")
+            if ev:
+                shutil.rmtree(ev, ignore_errors=True)
+        win.destroy()
+    win.protocol("WM_DELETE_WINDOW", on_close)
     back_btn.configure(command=go_back)
     open_btn.configure(command=open_sel)
     canvas.bind("<Configure>", resize_logo)
@@ -2961,7 +3463,8 @@ def run_gui(test=None):
         api = {"win": win, "enter": enter, "go_back": go_back, "g": g, "thumbs": thumbs,
                "open_viewer": open_viewer, "do_move": do_move, "undo": undo_move,
                "photo_items": photo_items, "state": state, "errors": test_errors,
-               "create": new_folder}
+               "create": new_folder, "add_job": add_job, "jobs": jobs,
+               "cancel_job": cancel_job}
         win.after(500, lambda: test(api))
     else:
         threading.Thread(target=update_job, daemon=True).start()
@@ -3004,6 +3507,13 @@ def gui_self_test():
     root = data_dir()
     festa = os.path.join(root, "festa_autoteste")
     shutil.rmtree(festa, ignore_errors=True)
+    fila = os.path.join(app_dir(), "fila_autoteste")
+    shutil.rmtree(fila, ignore_errors=True)
+    for i in range(3):              # pastas sem rosto: cada uma tem que dar erro sozinha
+        os.makedirs(os.path.join(fila, "pasta_%d" % i))
+        for k in range(2):
+            cv2.imwrite(os.path.join(fila, "pasta_%d" % i, "f%d.jpg" % k),
+                        np.full((300, 400, 3), 60 * k + 40 * i, np.uint8))
     for a in ("aluno_a", "aluno_b"):
         os.makedirs(os.path.join(festa, a))
         for i in range(4):
@@ -3041,13 +3551,24 @@ def gui_self_test():
             check(len(photos_in(a)) == 4, "desfazer")
             api["go_back"]()
             api["go_back"]()
+            for i in range(3):
+                api["add_job"](os.path.join(fila, "pasta_%d" % i))
+            sts = [j["state"] for j in api["jobs"]]
+            check(sts == ["rodando", "rodando", "espera"], "fila 2 por vez (%s)" % sts)
+            api["cancel_job"](api["jobs"][2])
+            check(api["jobs"][2]["state"] == "cancelado", "cancelar na fila")
+
+        def s3b():
+            sts = [j["state"] for j in api["jobs"]]
+            check(sts == ["erro", "erro", "cancelado"], "fila terminou (%s)" % sts)
+            check(len(api["state"].get("summary") or []) == 3, "resumo da fila")
 
         def s4():
             errs = api["errors"]
             result["msg"] = ("ok janela v%d" % VERSAO) if not errs else \
                 "erro: " + " | ".join(errs)
             win.destroy()
-        steps = [s1, s2, s3, s4]
+        steps = [s1, s2, s3, s3b, s4]
 
         def run(i=0):
             try:
@@ -3058,7 +3579,8 @@ def gui_self_test():
                 if i < len(steps) - 1:
                     i = len(steps) - 2
             if i + 1 < len(steps):
-                win.after(4000 if i == 0 else 1500, lambda: run(i + 1))
+                win.after(4000 if i == 0 else 20000 if steps[i] is s3 else 1500,
+                          lambda: run(i + 1))
         run()
 
     try:
@@ -3066,6 +3588,7 @@ def gui_self_test():
     except Exception:
         result["msg"] = "erro: " + traceback.format_exc()
     shutil.rmtree(festa, ignore_errors=True)
+    shutil.rmtree(fila, ignore_errors=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(result["msg"])
 
