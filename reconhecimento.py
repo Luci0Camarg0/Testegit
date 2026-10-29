@@ -415,24 +415,29 @@ def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
 
 
 def scan_faces(images, engine, log=print, progress=lambda done, total, text=None: None,
-               extra=None):
+               extra=None, card_reads=None):
     """
     Detecta e descreve todos os rostos. Retorna (embeddings, foto de cada
     rosto, confianca, caixa x,y,w,h de cada rosto). Com extra={} guarda tambem
     como cada rosto esta (olhos, boca, virado) e uma miniatura de cada foto,
-    usados para separar as fotos bonitas.
+    usados para separar as fotos bonitas. Com card_reads={} ja le a ficha de
+    cada foto que pode ser ficha, com a foto ainda aberta (sem abrir de novo).
     """
     embs, photo_ids, scores, boxes = [], [], [], []
     looks = extra.setdefault("looks", []) if extra is not None else None
     minis = extra.setdefault("minis", {}) if extra is not None else None
+    text = "Analisando fotos e fichas..." if card_reads is not None else "Analisando fotos..."
+    if card_reads is not None:
+        with _ocr_lock:
+            get_ocr(log)
     total = len(images)
     for i, path in enumerate(images):
         img = read_image(path)
         if img is None:
             log("Não foi possível abrir: %s" % os.path.basename(path))
-            progress(i + 1, total, "Analisando fotos...")
+            progress(i + 1, total, text)
             continue
-        kept = 0
+        first, kept = len(embs), 0
         for f in engine.detect(img):
             if f[2] < MIN_FACE_PX or f[3] < MIN_FACE_PX or f[14] < MIN_SCORE:
                 continue
@@ -449,7 +454,14 @@ def scan_faces(images, engine, log=print, progress=lambda done, total, text=None
         if minis is not None:
             minis[i] = photo_mini(img)
         log("%s: %d rosto(s)" % (os.path.basename(path), kept))
-        progress(i + 1, total, "Analisando fotos...")
+        if card_reads is not None and not card_reads.get(None):
+            ks = [k for k in range(first, len(embs)) if scores[k] >= SURE_FACE]
+            read = _card_candidate(img, ks, {k: np.array(boxes[k], np.float32) for k in ks}, log)
+            if read is not None:
+                card_reads[i] = read
+            if read == "erro":
+                card_reads[None] = True     # leitor quebrou: nao tenta mais fichas
+        progress(i + 1, total, text)
     return (np.array(embs, np.float32).reshape(-1, 128), np.array(photo_ids, int),
             np.array(scores), np.array(boxes, np.float32).reshape(-1, 4))
 
@@ -561,6 +573,10 @@ def face_look(img, f):
     # cabeca virada: nariz em relacao ao meio das bochechas (-1 .. 1)
     mid = (P[234, 0] + P[454, 0]) / 2
     out["turn"] = float((P[1, 0] - mid) / (abs(P[454, 0] - P[234, 0]) / 2 + 1e-6))
+    # onde a iris esta dentro de cada olho (0 = no meio; - esquerda, + direita
+    # da foto), somando os dois olhos: mais preciso que as expressoes do modelo
+    out["iris"] = float((P[468, 0] - P[33, 0]) / (P[133, 0] - P[33, 0] + 1e-6) +
+                        (P[473, 0] - P[362, 0]) / (P[263, 0] - P[362, 0] + 1e-6) - 1)
     return out
 
 
@@ -580,6 +596,11 @@ def photo_mini(img):
 EYES_CLOSED_BLINK = 0.42    # quanto o modelo acha que os dois olhos estao fechados
 EYES_CLOSED_SQUINT = 0.10   # ...e bem mais "fechado" do que "apertado" (sorriso)
 LOOK_AWAY = 0.55            # direcao do olhar em relacao a camera
+# Pela posicao da iris (601 rostos da Manha, conferidos um a um): olhando para a
+# camera ficou ate 0.15 (2T1A9436 da Alice, 2T1A9576 do Leite); olhando para o lado
+# a partir de 0.23 (2T1A9561 e 9562 do Bento, 2T1A9581 da Agatha), que passavam.
+IRIS_AWAY = 0.20
+IRIS_TURN = 0.4             # quanto a cabeca virada puxa a iris para o outro lado
 MOUTH_OPEN_JAW = 0.35       # boca muito aberta
 MOUTH_OPEN_RATIO = 0.35
 SAME_SHOT = 0.92            # duas fotos seguidas quase iguais (mesma pose e fundo)
@@ -603,6 +624,9 @@ def look_problem(q):
     # (cabeca virada com os olhos voltados para a camera da quase zero)
     eyes = ((q["outL"] + q["inR"]) - (q["inL"] + q["outR"])) / 2
     if abs(eyes + 2 * q["turn"]) >= LOOK_AWAY:
+        return "olhando para o lado"
+    # pela iris: cabeca virada para um lado e olhos para o outro = olhando a camera
+    if "iris" in q and abs(q["iris"] + IRIS_TURN * q["turn"]) >= IRIS_AWAY:
         return "olhando para o lado"
     return ""
 
@@ -1657,38 +1681,40 @@ def _iou(a, b):
     return inter / float(union or 1)
 
 
-def find_cards(images, photo_ids, scores, boxes, log=print,
-               progress=lambda done, total, text=None: None):
+def _card_candidate(img, ks, boxes, log=print):
+    """
+    Le a ficha de uma foto, se ela pode ser foto de ficha: ate 3 rostos certos
+    e o maior (o aluno) bem maior que os outros. Retorna (nome, codigo, ficha
+    da Gala?, numero grande, rosto do aluno), None se nao e candidata, ou
+    "erro" se o leitor de fichas falhou.
+    """
+    if not ks or len(ks) > 3:
+        return None
+    k = max(ks, key=lambda k: boxes[k][2] * boxes[k][3])     # o aluno: maior rosto
+    if len(ks) > 1 and sorted(boxes[j][2] * boxes[j][3] for j in ks)[-2] > \
+            0.6 * boxes[k][2] * boxes[k][3]:
+        return None             # dois rostos do mesmo tamanho: foto de grupo, nao ficha
+    try:
+        with _ocr_lock:
+            name, code, gala, number = read_card_photo(img, boxes[k])
+    except Exception as e:
+        log("Leitor de fichas falhou: %s" % e)
+        return "erro"
+    return name, code, gala, number, k
+
+
+def find_cards(images, card_reads, log=print):
     """
     Acha, no meio das fotos da festa, as fotos de ficha: poucas pessoas e,
-    logo abaixo do maior rosto, um texto com nome e codigo. Retorna
-    {foto: (nome, codigo, rosto do aluno)}.
+    logo abaixo do maior rosto, um texto com nome e codigo. Usa as leituras
+    feitas por scan_faces (card_reads). Retorna {foto: (nome, codigo, rosto do aluno)}.
     """
-    sure = {}
-    for k, ph in enumerate(photo_ids):
-        if scores[k] >= SURE_FACE:
-            sure.setdefault(int(ph), []).append(k)
-    cands = sorted(ph for ph, ks in sure.items() if len(ks) <= 3)
     cards, maybe, gala_codes = {}, [], []
-    if cands:
-        with _ocr_lock:
-            get_ocr(log)
-    for n, ph in enumerate(cands):
-        progress(n + 1, len(cands), "Procurando fichas...")
-        ks = sure[ph]
-        k = max(ks, key=lambda k: boxes[k][2] * boxes[k][3])     # o aluno: maior rosto
-        if len(ks) > 1 and sorted(boxes[j][2] * boxes[j][3] for j in ks)[-2] > \
-                0.6 * boxes[k][2] * boxes[k][3]:
-            continue            # dois rostos do mesmo tamanho: foto de grupo, nao ficha
-        img = read_image(images[ph])
-        if img is None:
-            continue
-        try:
-            with _ocr_lock:
-                name, code, gala, number = read_card_photo(img, boxes[k])
-        except Exception as e:
-            log("Leitor de fichas falhou: %s" % e)
+    for ph in sorted(p for p in card_reads if p is not None):
+        read = card_reads[ph]
+        if read == "erro":
             break
+        name, code, gala, number, k = read
         words = plain(name).split()
         if len(words) > 6 or any(w in CARD_JUNK for w in words):
             name = ""               # pegou o texto impresso da ficha, nao o nome
@@ -1753,12 +1779,12 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
 
     extra = {}
     look_models(log)                 # detector de olhos fechados (baixa uma vez)
-    embs, photo_ids, scores, boxes = scan_faces(images, engine, log, progress, extra)
+    card_reads = {}                  # fichas lidas junto com os rostos (abre cada foto uma vez)
+    embs, photo_ids, scores, boxes = scan_faces(images, engine, log, progress, extra, card_reads)
     if not len(embs):
         raise RuntimeError("Nenhum rosto encontrado nas fotos.")
 
-    log("Procurando fotos de ficha...")
-    cards = find_cards(images, photo_ids, scores, boxes, log, progress)
+    cards = find_cards(images, card_reads, log)
     owner = {}                       # rosto -> pasta (para olhar so o rosto do aluno)
 
     if cards:

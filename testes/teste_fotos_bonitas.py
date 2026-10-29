@@ -55,6 +55,13 @@ def test_problemas_do_rosto():
     # 2T1A9581 (Manha): olhando para o lado na foto da turma -> descarta
     assert R.look_problem(face(inL=0.73, outR=0.73, outL=0.05, inR=0.05, turn=-0.23)) == \
         "olhando para o lado"
+    # pela iris (Manha): 2T1A9561 do Bento olhando para o lado -> descarta
+    assert R.look_problem(face(outL=0.01, inL=0.36, outR=0.35, inR=0.02, turn=-0.09,
+                               iris=-0.21)) == "olhando para o lado"
+    # 2T1A9533 do Theo: cabeca virada, olhos na camera -> fica
+    assert R.look_problem(face(iris=0.32, turn=-0.70, outL=0.96, inR=0.96, inL=0.0, outR=0.0)) == ""
+    # 2T1A9436 da Alice: olhando para a camera -> fica
+    assert R.look_problem(face(iris=0.14, turn=0.02)) == ""
 
 
 def test_descarta_so_dentro_do_aluno():
