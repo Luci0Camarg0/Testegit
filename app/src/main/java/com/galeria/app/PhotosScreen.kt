@@ -55,7 +55,7 @@ fun PhotosScreen() {
     val monthFmt = remember { SimpleDateFormat("MMMM 'de' yyyy", Locale("pt", "BR")) }
     val groups = remember(photos) { photos.withIndex().groupBy { monthFmt.format(Date(it.value.dateTaken)) } }
 
-    LazyVerticalGrid(columns = GridCells.Fixed(4), modifier = Modifier.fillMaxSize()) {
+    LazyVerticalGrid(columns = GridCells.Adaptive(96.dp), modifier = Modifier.fillMaxSize()) {
         groups.forEach { (month, items) ->
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
