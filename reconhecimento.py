@@ -59,9 +59,11 @@ CLOSEUP_SIDE = 640          # tamanho usado para achar rostos muito grandes (fot
 SAME_PERSON = 0.36          # similaridade (cosseno) para juntar rostos
 MERGE_GROUPS = 0.42         # similaridade entre medias para juntar grupos da mesma pessoa
 SURE_FACE = 0.80            # pessoa que so aparece em rostos abaixo disso e ignorada (maos, pele...)
+UPRIGHT_SURE = 0.90         # rosto em pe com essa certeza: nao precisa girar a foto (3x mais rapido)
 MATCH_STUDENT = 0.38        # com cadastro: similaridade media minima entre a pessoa e o aluno
 LEFTOVER_FOLDER = "sem_aluno"   # fotos que nao foram para nenhum aluno
 DISCARD_FOLDER = "fotos_descartadas"  # dentro do aluno: olho fechado, olhando para o lado...
+CARD_REASON = "foto da ficha"   # a foto da ficha tambem vai para fotos_descartadas
 NO_ID_FOLDER = "aluno_sem_id%d"  # aluno sem ficha legivel: separado so pelo rosto
 DOUBT_SUFFIX = "_conferir"   # numero repetido em fichas de alunos diferentes
 SAME_CARD_FACE = 0.65       # duas fichas com o mesmo numero: so junta se for o mesmo rosto
@@ -75,6 +77,7 @@ FREE_GROUP = 0.55           # fotos fora da sequencia: primeiro junta as da mesm
 FREE_MATCH = 0.65           # ...e o grupo so vai para o aluno se parecer muito com ele
 FREE_MARGIN = 0.15          # ...e bem mais do que com o segundo aluno mais parecido
 NO_ID_SAME = 0.50           # fotos sem ficha: mesma pessoa para virar uma pasta aluno_sem_idN
+QUICK_TEXT_SIDE = 640       # olhada rapida se o papel branco tem escrita antes de ler a ficha
 MAX_PARALLEL = 2            # fila de pastas: quantas pastas sao processadas ao mesmo tempo
 
 
@@ -266,6 +269,8 @@ class FaceEngine:
             if score > best_score:
                 best_score = score
                 best = [_unrotate(f, rot, sw, sh) for f in faces]
+            if rot == 0 and score >= UPRIGHT_SURE:
+                break   # foto em pe (quase todas): as outras rotacoes nao ganhariam
         if not best:
             return np.zeros((0, 15), np.float32)
         faces = np.array(best, np.float32)
@@ -414,6 +419,22 @@ def merge_groups(X, groups, ids, threshold=MERGE_GROUPS):
     return groups
 
 
+class _Prefetch:
+    """Abre uma foto numa thread separada (threading puro: os .exe antigos
+    podem nao trazer concurrent.futures)."""
+    def __init__(self, path):
+        self.img = None
+        self.t = threading.Thread(target=self._run, args=(path,), daemon=True)
+        self.t.start()
+
+    def _run(self, path):
+        self.img = read_image(path)
+
+    def get(self):
+        self.t.join()
+        return self.img
+
+
 def scan_faces(images, engine, log=print, progress=lambda done, total, text=None: None,
                extra=None, card_reads=None):
     """
@@ -431,8 +452,11 @@ def scan_faces(images, engine, log=print, progress=lambda done, total, text=None
         with _ocr_lock:
             get_ocr(log)
     total = len(images)
+    nxt = _Prefetch(images[0]) if images else None
     for i, path in enumerate(images):
-        img = read_image(path)
+        img = nxt.get()
+        # a proxima foto ja vai sendo aberta enquanto esta e analisada
+        nxt = _Prefetch(images[i + 1]) if i + 1 < total else None
         if img is None:
             log("Não foi possível abrir: %s" % os.path.basename(path))
             progress(i + 1, total, text)
@@ -640,7 +664,8 @@ def pick_good_photos(people, owner, photo_ids, looks, minis, card_photos, reason
     Escolhe, em cada pasta de aluno, as fotos que vao para fotos_descartadas:
     olho fechado ou olhando para o lado (olhando so o rosto daquele aluno), e
     boca muito aberta quando existe uma foto quase igual com a boca fechada.
-    A separacao dos alunos nao muda. A foto da ficha nunca e descartada, e a
+    A separacao dos alunos nao muda. A foto da ficha nao e julgada aqui (ela
+    vai para fotos_descartadas de qualquer jeito, em process_folder), e a
     pasta nunca fica sem nenhuma foto boa. Retorna {pasta: {fotos}}.
     """
     faces = {}
@@ -675,7 +700,7 @@ def pick_good_photos(people, owner, photo_ids, looks, minis, card_photos, reason
                         float(minis[p] @ minis[o]) >= SAME_SHOT:
                     bad[p] = "boca aberta (tem uma igual de boca fechada)"
                     break
-        if judged and len(bad) == len(judged) and not set(ph) & set(card_photos):
+        if judged and len(bad) == len(judged):
             # todas ruins: a menos ruim fica, para a pasta nao ficar vazia
             keep = min(bad, key=lambda p: (q[p] or {}).get("blinkL", 0) +
                        (q[p] or {}).get("blinkR", 0))
@@ -1637,6 +1662,21 @@ def _big_number(res, card):
     return best
 
 
+def _has_text(card):
+    """Olhada rapida (so a deteccao de texto, em tamanho pequeno): o papel
+    branco tem alguma escrita? A maioria das fotos com fundo branco nao tem
+    ficha, e assim pula a leitura completa, que e lenta."""
+    try:
+        from rapidocr_onnxruntime.ch_ppocr_det.utils import DetPreProcess
+        det = get_ocr().text_det
+        # o detector sozinho AUMENTA o recorte (lado menor 736): aqui no maximo 640
+        x = DetPreProcess(QUICK_TEXT_SIDE, "max", det.mean, det.std)(card)
+        boxes, _ = det.postprocess_op(det.infer(x)[0], card.shape[:2])
+        return boxes is not None and len(boxes) > 0
+    except Exception:
+        return True             # na duvida, le a ficha inteira como antes
+
+
 def read_card_photo(img, face_box):
     """
     Le a ficha que o aluno segura abaixo do rosto. Retorna (nome, codigo, ficha
@@ -1658,7 +1698,7 @@ def read_card_photo(img, face_box):
         k = min(1.0, 1600.0 / max(hh, ww))
         if k < 1:
             card = cv2.resize(card, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
-        res, _ = get_ocr()(card)
+        res, _ = get_ocr()(card) if _has_text(card) else ([], None)
         res = [r for r in (res or []) if r[2] >= 0.5]
         gala = read_gala_card(card, res)
         if gala is not None:
@@ -1853,6 +1893,14 @@ def process_folder(src, engine, log=print, progress=lambda done, total, text=Non
         for folder, items in why.items():
             for p, r in sorted(items.items()):
                 log("Descartada: %s/%s (%s)" % (folder, os.path.basename(images[p]), r))
+    # a foto em que o aluno segura a ficha nao vai para o album: depois de
+    # separar, ela fica em fotos_descartadas (a separacao nao muda)
+    for folder, ph in people:
+        if folder == LEFTOVER_FOLDER:
+            continue
+        for p in sorted(set(ph) & set(cards)):
+            discard.setdefault(folder, set()).add(p)
+            why.setdefault(folder, {})[p] = CARD_REASON
     if report is not None:
         report["descartadas"] = sum(len(v) for v in discard.values())
 
@@ -3801,7 +3849,7 @@ def run_gui(test=None):
         else:
             text = "%s criada com %d pessoa(s)." % (os.path.basename(ev), n)
         if rep.get("descartadas"):
-            text += (" %d foto(s) com olho fechado ou olhando para o lado foram para "
+            text += (" %d foto(s) (fichas, olho fechado ou olhando para o lado) foram para "
                      "%s, dentro da pasta de cada aluno." % (rep["descartadas"], DISCARD_FOLDER))
         return text
 

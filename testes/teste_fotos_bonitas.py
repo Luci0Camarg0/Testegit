@@ -92,7 +92,15 @@ def test_olha_o_rosto_do_proprio_aluno():
     assert out == {"joao_2": {0}}, out
 
 
-def test_ficha_nunca_e_descartada():
+def test_pasta_com_ficha_nao_fica_vazia():
+    # a ficha vai para fotos_descartadas (process_folder): a menos ruim das
+    # outras fica na pasta
+    looks = [face(), CLOSED, face(blinkL=0.9, blinkR=0.9, earL=0.05, earR=0.05)]
+    out = run(looks, [("aluno_1", [0, 1, 2])], {k: "aluno_1" for k in range(3)}, cards=[0])
+    assert out == {"aluno_1": {2}}, out
+
+
+def test_ficha_nao_e_julgada_pelo_rosto():
     looks = [CLOSED, face()]
     out = run(looks, [("aluno_2421", [0, 1])], {0: "aluno_2421", 1: "aluno_2421"}, cards=[0])
     assert out == {}, out
