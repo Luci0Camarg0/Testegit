@@ -2259,8 +2259,7 @@ def log_error(text):
 def run_gui(test=None):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
-    import tkinter.font as tkfont
-    from PIL import Image, ImageTk, ImageDraw
+    from PIL import Image, ImageTk
 
     root_dir = data_dir()
     state = {"current": None, "engine": None, "busy": False,
@@ -2307,14 +2306,22 @@ def run_gui(test=None):
         # botao com as pontas redondas, desenhado 4x maior e reduzido (borda lisa)
         key = (w, h, fill, outline)
         if key not in pill_cache:
-            k = 4
-            im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
-            dr = ImageDraw.Draw(im)
-            dr.rounded_rectangle((0, 0, w * k - 1, h * k - 1), radius=h * k // 2, fill=fill,
-                                 outline=outline, width=k if outline else 0)
+            # so numpy (os .exe antigos nao trazem PIL.ImageDraw nem tkinter.font)
+            r = h / 2.0
+            yy, xx = np.mgrid[0:h, 0:w] + 0.5
+            cx = np.clip(xx, r, w - r)
+            d = np.hypot(xx - cx, yy - r) - (r - 0.5)       # <0 dentro do botao
+            inside = np.clip(0.5 - d, 0, 1)
+            rgb = np.empty((h, w, 3), float)
+            rgb[:] = [int(fill[i:i + 2], 16) for i in (1, 3, 5)]
+            if outline:
+                ring = np.clip(1.5 - np.abs(d + 0.5), 0, 1) * inside
+                oc = np.array([int(outline[i:i + 2], 16) for i in (1, 3, 5)], float)
+                rgb = rgb * (1 - ring[..., None]) + oc * ring[..., None]
+            im = np.dstack([rgb, inside * 255]).astype(np.uint8)
             if len(pill_cache) > 300:
                 pill_cache.clear()
-            pill_cache[key] = ImageTk.PhotoImage(im.resize((w, h), Image.LANCZOS))
+            pill_cache[key] = ImageTk.PhotoImage(Image.fromarray(im, "RGBA"))
         return pill_cache[key]
 
     class PillButton(tk.Canvas):
@@ -2324,13 +2331,13 @@ def run_gui(test=None):
             self._base = ACCENT if primary else PANEL
             self._hover = ACCENT_HOVER if primary else "#2a1a1c"
             self._edge = None if primary else "#2e2e33"
-            self._font = tkfont.Font(font=font_b if primary else font)
+            self._font = font_b if primary else font
             self._opt = {"text": text, "command": cmd, "state": "normal", "fg": FG,
                          "disabledforeground": "#5a5a5e"}
             self._bg = self._base
             self._job = None
-            w = self._font.measure(text) + 40
-            h = self._font.metrics("linespace") + 18
+            w = int(parent.tk.call("font", "measure", self._font, text)) + 40
+            h = int(parent.tk.call("font", "metrics", self._font, "-linespace")) + 18
             super().__init__(parent, width=w, height=h, bg=parent.cget("bg"),
                              highlightthickness=0, bd=0, cursor="hand2")
             self._pw, self._ph = w, h
@@ -2497,7 +2504,10 @@ def run_gui(test=None):
     targets.configure(yscrollcommand=tsb.set)
     tsb.pack(side="right", fill="y")
     targets.pack(side="left", fill="both", expand=True)
-    fnt = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+    tname_font = ("Segoe UI", 10, "bold")
+
+    def text_w(txt):
+        return int(win.tk.call("font", "measure", tname_font, txt))
     gcan = tk.Canvas(gal, bg=BG, highlightthickness=1, highlightbackground=LINE, bd=0,
                      yscrollincrement=40, height=120)
     gsb = ttk.Scrollbar(gal, orient="vertical", command=gcan.yview,
@@ -2972,8 +2982,8 @@ def run_gui(test=None):
             tx = ax + r + 10
             maxw = px0 - tx - 8
             shown = name
-            if fnt.measure(shown) > maxw:
-                while len(shown) > 1 and fnt.measure(shown + "…") > maxw:
+            if text_w(shown) > maxw:
+                while len(shown) > 1 and text_w(shown + "…") > maxw:
                     shown = shown[:-1]
                 shown = shown.rstrip() + "…"
             targets.create_text(tx, cy - 8, text=shown, anchor="w", fill=FG,
