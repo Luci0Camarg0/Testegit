@@ -2260,7 +2260,7 @@ def run_gui(test=None):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
     import tkinter.font as tkfont
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw
 
     root_dir = data_dir()
     state = {"current": None, "engine": None, "busy": False,
@@ -2301,30 +2301,99 @@ def run_gui(test=None):
                     bordercolor=BG, arrowcolor=FG_DIM, lightcolor=PANEL, darkcolor=PANEL)
     style.map("Dark.Vertical.TScrollbar", background=[("active", ROW_HOVER)])
 
-    def fade_bg(w, target, steps=8, ms=16):
-        """Troca a cor de fundo aos poucos (botoes 'fluidos')."""
-        w._fade_to = target
+    pill_cache = {}
 
-        def step(k=1):
-            if getattr(w, "_fade_to", None) != target or not w.winfo_exists():
-                return
-            w.configure(bg=mix(w._fade_from, target, ease_out(k / steps)))
-            if k < steps:
-                w.after(ms, lambda: step(k + 1))
-        w._fade_from = w.cget("bg")
-        step()
+    def pill_image(w, h, fill, outline):
+        # botao com as pontas redondas, desenhado 4x maior e reduzido (borda lisa)
+        key = (w, h, fill, outline)
+        if key not in pill_cache:
+            k = 4
+            im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rounded_rectangle((0, 0, w * k - 1, h * k - 1), radius=h * k // 2, fill=fill,
+                                 outline=outline, width=k if outline else 0)
+            if len(pill_cache) > 300:
+                pill_cache.clear()
+            pill_cache[key] = ImageTk.PhotoImage(im.resize((w, h), Image.LANCZOS))
+        return pill_cache[key]
+
+    class PillButton(tk.Canvas):
+        """Botao oval nas pontas, com a mesma cara do tk.Button usado antes."""
+
+        def __init__(self, parent, text, cmd, primary):
+            self._base = ACCENT if primary else PANEL
+            self._hover = ACCENT_HOVER if primary else "#2a1a1c"
+            self._edge = None if primary else "#2e2e33"
+            self._font = tkfont.Font(font=font_b if primary else font)
+            self._opt = {"text": text, "command": cmd, "state": "normal", "fg": FG,
+                         "disabledforeground": "#5a5a5e"}
+            self._bg = self._base
+            self._job = None
+            w = self._font.measure(text) + 40
+            h = self._font.metrics("linespace") + 18
+            super().__init__(parent, width=w, height=h, bg=parent.cget("bg"),
+                             highlightthickness=0, bd=0, cursor="hand2")
+            self._pw, self._ph = w, h
+            self.bind("<Enter>", lambda e: self._state() == "normal" and self._fade(self._hover))
+            self.bind("<Leave>", lambda e: self._fade(self._base))
+            self.bind("<ButtonRelease-1>", self._click)
+            self._draw()
+
+        def _state(self):
+            return self._opt["state"]
+
+        def _draw(self):
+            self.delete("all")
+            self.create_image(0, 0, anchor="nw",
+                              image=pill_image(self._pw, self._ph, self._bg, self._edge))
+            fg = (self._opt["fg"] if self._state() == "normal"
+                  else self._opt["disabledforeground"])
+            self.create_text(self._pw / 2, self._ph / 2, text=self._opt["text"], fill=fg,
+                             font=self._font)
+
+        def _fade(self, target, steps=8, k=1, start=None):
+            if k == 1:
+                if self._job:
+                    self.after_cancel(self._job)
+                start = self._bg
+            self._bg = mix(start, target, ease_out(k / steps))
+            self._draw()
+            self._job = self.after(16, lambda: self._fade(target, steps, k + 1, start)) \
+                if k < steps else None
+
+        def _click(self, e):
+            if (self._state() == "normal" and self._opt["command"]
+                    and 0 <= e.x < self._pw and 0 <= e.y < self._ph):
+                self._opt["command"]()
+
+        def configure(self, cnf=None, **kw):
+            mine = {k: kw.pop(k) for k in list(kw) if k in self._opt}
+            kw.pop("activeforeground", None)
+            if mine:
+                self._opt.update(mine)
+                if mine.get("state") == "disabled":
+                    if self._job:
+                        self.after_cancel(self._job)
+                        self._job = None
+                    self._bg = self._base
+                self.configure(cursor="hand2" if self._state() == "normal" else "")
+                self._draw()
+            if cnf or kw:
+                return super().configure(cnf, **kw)
+        config = configure
+
+        def cget(self, key):
+            return self._opt[key] if key in self._opt else super().cget(key)
+
+        def __getitem__(self, key):
+            return self.cget(key)
+
+        def invoke(self):
+            if self._state() == "normal" and self._opt["command"]:
+                return self._opt["command"]()
 
     def make_button(parent, text, cmd, primary=False):
-        base = ACCENT if primary else PANEL
-        hover = ACCENT_HOVER if primary else "#2a1a1c"
-        b = tk.Button(parent, text=text, command=cmd, bg=base, fg=FG,
-                      activebackground=hover, activeforeground=FG,
-                      disabledforeground="#5a5a5e", relief="flat", bd=0,
-                      highlightthickness=0, font=font_b if primary else font,
-                      padx=18, pady=9, cursor="hand2")
-        b.bind("<Enter>", lambda e: fade_bg(b, hover) if b["state"] == "normal" else None)
-        b.bind("<Leave>", lambda e: fade_bg(b, base))
-        return b
+        return PillButton(parent, text, cmd, primary)
 
     # --- cabecalho (logo pequena + titulo, faixa vermelha embaixo) ----------
     header = tk.Canvas(win, bg=BG, height=HEADER_H, highlightthickness=0, bd=0)
@@ -2370,7 +2439,6 @@ def run_gui(test=None):
     add_btn = make_button(top, "+  Adicionar pasta de fotos", None, primary=True)
     add_btn.pack(side="left")
     back_btn = make_button(top, "‹  Voltar", None)
-    back_btn.configure(fg=YELLOW, activeforeground=YELLOW, disabledforeground="#857000")
     back_btn.pack(side="left", padx=(10, 0))
     open_btn = make_button(top, "Abrir no Explorer", None)
     open_btn.pack(side="right")
