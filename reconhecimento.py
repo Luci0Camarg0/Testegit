@@ -33,7 +33,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 21
+VERSAO = 22
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -982,7 +982,23 @@ def get_ocr(log=print):
             _ocr.text_rec.postprocess_op = _KeepProbs(_ocr.text_rec.postprocess_op)
         except Exception:
             pass
+        _fast_det_normalize()
     return _ocr
+
+
+def _fast_det_normalize():
+    """O detector de texto preparava a imagem em float64 (lento, ~25% da
+    leitura de cada ficha). Mesma conta em float32."""
+    try:
+        from rapidocr_onnxruntime.ch_ppocr_det.utils import DetPreProcess
+
+        def normalize(self, img):
+            mean = np.asarray(self.mean, np.float32)
+            std = np.asarray(self.std, np.float32)
+            return (img.astype(np.float32) * np.float32(self.scale) - mean) / std
+        DetPreProcess.normalize = normalize
+    except Exception:
+        pass
 
 
 def _last_probs():

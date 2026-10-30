@@ -46,6 +46,8 @@ FOTOS BONITAS
     * olhando para o lado (cabeça virada com os olhos para a câmera não conta);
     * de boca muito aberta, quando existe outra foto quase igual (mesma pose,
       tirada logo antes ou depois) com a boca fechada.
+- A foto em que o aluno segura a ficha também vai para fotos_descartadas (ela
+  não entra no álbum). Ela é usada só para saber quem é o aluno.
 - Em fotos_descartadas tem o arquivo motivos.txt dizendo por que cada foto saiu.
   Nada é apagado: para reaproveitar, arraste a foto de volta na galeria.
 - A foto da ficha nunca é descartada, e a pasta do aluno nunca fica sem foto boa
