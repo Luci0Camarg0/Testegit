@@ -33,7 +33,7 @@ APP_NAME = "Reconhecimento Facial"
 # Atualizacao automatica: a cada mudanca no codigo, aumente VERSAO aqui e em
 # versao.json. RUNTIME_NEEDED so aumenta quando o .exe inteiro precisa ser
 # baixado de novo (biblioteca ou modelo novo); veja iniciar.py.
-VERSAO = 20
+VERSAO = 21
 RUNTIME_NEEDED = 1
 UPDATE_BASE = os.environ.get("RF_UPDATE_BASE") or \
     "https://raw.githubusercontent.com/Luci0Camarg0/Testegit/reconhecimento-facial/"
@@ -1996,6 +1996,8 @@ YELLOW = "#ffd600"
 FG_DIM = "#a8a8ad"
 LOGO_OPACITY = 0.10         # logo de fundo bem suave para nao atrapalhar a leitura
 ROW_H = 36
+TARGET_H = 50               # altura de cada aluno na lista "Mover para"
+TARGET_W = 300
 HEADER_H = 64
 SPLASH_SECONDS = 3.0        # abertura: logo da Gala no fundo preto
 
@@ -2011,6 +2013,37 @@ def mix(c1, c2, t):
 def ease_out(t):
     t = max(0.0, min(1.0, t))
     return 1 - (1 - t) ** 3
+
+
+def student_label(folder):
+    """'alice_maranoaglle_2373' -> ('Alice Maranoaglle', '2373', '')."""
+    parts = folder.split("_")
+    tag = ""
+    if len(parts) > 1 and parts[-1].lower() == "conferir":
+        tag = "conferir"
+        parts = parts[:-1]
+    num = ""
+    if len(parts) > 1 and parts[-1].isdigit():
+        num = parts[-1]
+        parts = parts[:-1]
+    m = re.match(r"aluno_sem_id(\d*)$", "_".join(parts))
+    if m:
+        return ("Aluno sem id " + m.group(1)).strip(), "", tag
+    words = [w for w in parts if w]
+    small = {"da", "de", "do", "das", "dos", "e", "du", "di"}
+    name = " ".join(w if (i and w.lower() in small) else w[:1].upper() + w[1:]
+                    for i, w in enumerate(words))
+    return (name or folder), num, tag
+
+
+def initials(name):
+    if name.startswith("Aluno sem id") or name == "Sem Aluno":
+        return "?"
+    ws = [w for w in name.split() if w[:1].isalnum() and w.lower() not in
+          ("da", "de", "do", "das", "dos", "e", "du", "di")]
+    if not ws:
+        return "?"
+    return (ws[0][0] + (ws[-1][0] if len(ws) > 1 else "")).upper()
 
 
 def ease_in_out(t):
@@ -2226,6 +2259,7 @@ def log_error(text):
 def run_gui(test=None):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
+    import tkinter.font as tkfont
     from PIL import Image, ImageTk
 
     root_dir = data_dir()
@@ -2375,14 +2409,27 @@ def run_gui(test=None):
     gal = tk.Frame(win, bg=BG, padx=12)
     side = tk.Frame(gal, bg=BG)
     side.pack(side="left", fill="y", padx=(0, 10))
-    tk.Label(side, text="Mover para:", bg=BG, fg=FG, font=font_b, anchor="w").pack(fill="x")
-    tk.Label(side, text="Arraste as fotos para o aluno\ncerto. Dois cliques abrem.",
+    side_head = tk.Frame(side, bg=BG)
+    side_head.pack(fill="x")
+    tk.Label(side_head, text="Mover para", bg=BG, fg=FG, font=font_b,
+             anchor="w").pack(side="left")
+    side_count = tk.Label(side_head, text="", bg=ACCENT_DARK, fg=FG,
+                          font=("Segoe UI", 8, "bold"), padx=7)
+    side_count.pack(side="left", padx=(8, 0))
+    tk.Label(side, text="Arraste as fotos para o aluno certo.\nDois cliques abrem a pasta.",
              bg=BG, fg=FG_DIM, font=("Segoe UI", 9), justify="left", anchor="w").pack(fill="x")
-    targets = tk.Listbox(side, bg=PANEL, fg=FG, font=("Segoe UI", 10), width=30, relief="flat",
-                         highlightthickness=1, highlightbackground="#2a2a2a",
-                         highlightcolor="#2a2a2a", selectbackground=ACCENT,
-                         selectforeground=FG, activestyle="none", exportselection=False)
-    targets.pack(fill="both", expand=True, pady=(6, 0))
+    # lista de alunos desenhada (um cartao por aluno; fotos_descartadas so
+    # aparece quando abre a pasta do aluno)
+    tbox = tk.Frame(side, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+    tbox.pack(fill="both", expand=True, pady=(6, 0))
+    targets = tk.Canvas(tbox, bg=PANEL, width=TARGET_W, highlightthickness=0, bd=0,
+                        yscrollincrement=TARGET_H // 2)
+    tsb = ttk.Scrollbar(tbox, orient="vertical", command=targets.yview,
+                        style="Dark.Vertical.TScrollbar")
+    targets.configure(yscrollcommand=tsb.set)
+    tsb.pack(side="right", fill="y")
+    targets.pack(side="left", fill="both", expand=True)
+    fnt = tkfont.Font(family="Segoe UI", size=10, weight="bold")
     gcan = tk.Canvas(gal, bg=BG, highlightthickness=1, highlightbackground=LINE, bd=0,
                      yscrollincrement=40, height=120)
     gsb = ttk.Scrollbar(gal, orient="vertical", command=gcan.yview,
@@ -2392,7 +2439,8 @@ def run_gui(test=None):
     gcan.pack(side="left", fill="both", expand=True)
     TILE_W, TILE_H, GAP = THUMB_PX + 12, THUMB_PX + 34, 10
     g = {"items": [], "sel": set(), "anchor": None, "hover": None, "press": None,
-         "drag": None, "drop": None, "targets": [], "undo": [], "mode": "lista"}
+         "drag": None, "drop": None, "targets": [], "undo": [], "mode": "lista",
+         "thover": None, "tdrop": None}
     thumbs = {}                     # foto -> miniatura pronta para a tela
     asked = set()
     thumb_q = queue.Queue()
@@ -2804,18 +2852,107 @@ def run_gui(test=None):
         return path
 
     def fill_targets():
+        # so as pastas dos alunos (as subpastas, como fotos_descartadas, ficam
+        # dentro do aluno e aparecem quando abre a pasta dele)
         cur = state["current"]
         festa = festa_of(cur)
-        paths = []
-        for a in subdirs(festa):
-            pa = os.path.join(festa, a)
-            paths.append(pa)
-            paths += [os.path.join(pa, b) for b in subdirs(pa)]
+        paths = [os.path.join(festa, a) for a in subdirs(festa)]
         g["targets"] = [p for p in paths if os.path.normcase(p) != os.path.normcase(cur)]
-        targets.delete(0, "end")
-        for p in g["targets"]:
-            rel = os.path.relpath(p, festa).replace(os.sep, " / ")
-            targets.insert("end", "%s  (%d)" % (rel, len(photos_in(p))))
+        g["tinfo"] = [student_label(os.path.basename(p)) + (len(photos_in(p)),)
+                      for p in g["targets"]]
+        g["thover"] = g["tdrop"] = None
+        side_count.configure(text="%d aluno%s" % (len(g["targets"]),
+                                                  "" if len(g["targets"]) == 1 else "s"))
+        targets.yview_moveto(0)
+        draw_targets()
+
+    def draw_targets():
+        targets.delete("all")
+        tw = max(targets.winfo_width(), 120)
+        for k, (name, num, tag, n) in enumerate(g.get("tinfo", [])):
+            y = k * TARGET_H
+            cy = y + TARGET_H / 2
+            drop, hov = k == g["tdrop"], k == g["thover"]
+            if drop:
+                targets.create_rectangle(0, y + 2, tw, y + TARGET_H - 2, fill=ROW_SEL,
+                                         outline="")
+                targets.create_rectangle(0, y + 2, 4, y + TARGET_H - 2, fill=ACCENT_HOVER,
+                                         outline="")
+            elif hov:
+                targets.create_rectangle(0, y + 2, tw, y + TARGET_H - 2, fill=ROW_HOVER,
+                                         outline="")
+                targets.create_rectangle(0, y + 2, 3, y + TARGET_H - 2, fill=ACCENT,
+                                         outline="")
+            # bolinha com as iniciais
+            r = 16
+            ax = 12 + r
+            targets.create_oval(ax - r, cy - r, ax + r, cy + r,
+                                fill=ACCENT if (drop or hov) else ACCENT_DARK,
+                                outline=ACCENT_HOVER if drop else "")
+            targets.create_text(ax, cy, text=initials(name), fill=FG,
+                                font=("Segoe UI", 9, "bold"))
+            # quantidade de fotos (pilula na direita)
+            pill = "%d" % n
+            pw = 10 + 7 * len(pill)
+            px1 = tw - 10
+            px0 = px1 - pw
+            targets.create_rectangle(px0, cy - 10, px1, cy + 10,
+                                     fill=ACCENT if drop else "#232327", outline="")
+            targets.create_text((px0 + px1) / 2, cy, text=pill, fill=FG,
+                                font=("Segoe UI", 9, "bold"))
+            # nome e numero do aluno
+            tx = ax + r + 10
+            maxw = px0 - tx - 8
+            shown = name
+            if fnt.measure(shown) > maxw:
+                while len(shown) > 1 and fnt.measure(shown + "…") > maxw:
+                    shown = shown[:-1]
+                shown = shown.rstrip() + "…"
+            targets.create_text(tx, cy - 8, text=shown, anchor="w", fill=FG,
+                                font=("Segoe UI", 10, "bold"))
+            sub = ("nº " + num) if num else "sem ficha"
+            sub += "  ·  %d foto%s" % (n, "" if n == 1 else "s")
+            targets.create_text(tx, cy + 10, text=sub, anchor="w", fill=FG_DIM,
+                                font=("Segoe UI", 8))
+            if tag:
+                targets.create_text(px0 - 6, cy + 10, text="CONFERIR", anchor="e",
+                                    fill=YELLOW, font=("Segoe UI", 7, "bold"))
+            if k < len(g["tinfo"]) - 1 and not (drop or hov):
+                targets.create_line(ax + r + 10, y + TARGET_H - 1, tw - 10, y + TARGET_H - 1,
+                                    fill=LINE)
+        if not g.get("tinfo"):
+            targets.create_text(14, 22, text="Nenhum outro aluno nesta festa.", anchor="w",
+                                fill=FG_DIM, font=("Segoe UI", 9))
+        h = TARGET_H * len(g.get("tinfo", []))
+        targets.configure(scrollregion=(0, 0, tw, max(h, targets.winfo_height())))
+
+    def target_index(y_root):
+        y = targets.canvasy(y_root - targets.winfo_rooty())
+        k = int(y // TARGET_H)
+        return k if 0 <= k < len(g["targets"]) else None
+
+    def set_tdrop(k):
+        if k != g["tdrop"]:
+            g["tdrop"] = k
+            draw_targets()
+        if k is not None:           # rola a lista para mostrar o aluno
+            top, bot = targets.yview()
+            h = TARGET_H * max(len(g["targets"]), 1)
+            if k * TARGET_H < top * h:
+                targets.yview_moveto(k * TARGET_H / h)
+            elif (k + 1) * TARGET_H > bot * h:
+                targets.yview_moveto(((k + 1) * TARGET_H - targets.winfo_height()) / h)
+
+    def t_motion(e):
+        k = target_index(e.y_root)
+        if k != g["thover"]:
+            g["thover"] = k
+            draw_targets()
+
+    def t_leave(_e=None):
+        if g["thover"] is not None:
+            g["thover"] = None
+            draw_targets()
 
     def refresh_gallery():
         q = search_var.get().strip().lower()
@@ -2955,9 +3092,8 @@ def run_gui(test=None):
     def drop_target(xr, yr):
         w = win.winfo_containing(xr, yr)
         if w is targets and g["targets"]:
-            k = targets.nearest(yr - targets.winfo_rooty())
-            bb = targets.bbox(k)
-            if bb and bb[1] <= yr - targets.winfo_rooty() <= bb[1] + bb[3]:
+            k = target_index(yr)
+            if k is not None:
                 return g["targets"][k], k
         elif w is gcan:
             i = tile_at(gcan.canvasx(xr - gcan.winfo_rootx()),
@@ -2989,10 +3125,7 @@ def run_gui(test=None):
         ind = g["drag"][1]
         ind.geometry("+%d+%d" % (e.x_root + 14, e.y_root + 10))
         target, k = drop_target(e.x_root, e.y_root)
-        targets.selection_clear(0, "end")
-        if k is not None:
-            targets.selection_set(k)
-            targets.see(k)
+        set_tdrop(k)
         if target != g["drop"]:
             g["drop"] = target
             draw_gallery()
@@ -3015,7 +3148,7 @@ def run_gui(test=None):
         gcan.configure(cursor="")
         target, _k = drop_target(e.x_root, e.y_root)
         g["drop"] = None
-        targets.selection_clear(0, "end")
+        set_tdrop(None)
         if target:
             do_move(drag[0], target)
         else:
@@ -3184,8 +3317,8 @@ def run_gui(test=None):
         return "break"
 
     def target_double(e):
-        k = targets.nearest(e.y)
-        if 0 <= k < len(g["targets"]):
+        k = target_index(e.y_root)
+        if k is not None:
             enter(g["targets"][k])
 
     def show_in_explorer(path):
@@ -3739,6 +3872,14 @@ def run_gui(test=None):
     win.bind("<Control-z>", undo_move)
     win.bind("<Control-Z>", undo_move)
     targets.bind("<Double-1>", target_double)
+    targets.bind("<Motion>", t_motion)
+    targets.bind("<Leave>", t_leave)
+    targets.bind("<Configure>", lambda e: g["mode"] == "galeria" and draw_targets())
+    targets.bind("<MouseWheel>",
+                 lambda e: targets.yview_scroll(int(-e.delta / 120) or
+                                                (-1 if e.delta > 0 else 1), "units"))
+    targets.bind("<Button-4>", lambda e: targets.yview_scroll(-1, "units"))
+    targets.bind("<Button-5>", lambda e: targets.yview_scroll(1, "units"))
     canvas.bind("<Up>", lambda e: move_sel(-1))
     canvas.bind("<Down>", lambda e: move_sel(1))
     canvas.bind("<Return>", lambda e: state["sel"] and enter(state["sel"]))
@@ -3835,7 +3976,7 @@ def run_gui(test=None):
                "open_viewer": open_viewer, "do_move": do_move, "undo": undo_move,
                "photo_items": photo_items, "state": state, "errors": test_errors,
                "create": new_folder, "add_job": add_job, "jobs": jobs,
-               "cancel_job": cancel_job, "delete": delete_paths}
+               "cancel_job": cancel_job, "delete": delete_paths, "draw_targets": draw_targets}
         win.after(500, lambda: test(api))
     else:
         threading.Thread(target=update_job, daemon=True).start()
@@ -3891,6 +4032,7 @@ def gui_self_test():
             img = np.full((900, 600, 3), (40 * i, 120, 200), np.uint8)
             cv2.circle(img, (300, 300), 120, (220, 200, 180), -1)
             cv2.imwrite(os.path.join(festa, a, "foto_%d.jpg" % i), img)
+    os.makedirs(os.path.join(festa, "aluno_b", DISCARD_FOLDER))
     result = {"msg": "erro: nao terminou"}
 
     def script(api):
@@ -3906,6 +4048,7 @@ def gui_self_test():
             api["enter"](festa)
             api["enter"](a)
             check(len(api["photo_items"]()) == 4, "galeria com 4 fotos")
+            check(g["targets"] == [b], "lista mover para so com alunos (%s)" % g["targets"])
 
         def s2():
             check(len(api["thumbs"]) >= 4, "miniaturas (%d)" % len(api["thumbs"]))
