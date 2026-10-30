@@ -10,14 +10,28 @@ android {
 
     defaultConfig {
         applicationId = "com.galeria.app"
-        minSdk = 26
+        minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "0.1"
     }
 
+    // Chave fixa: assim cada APK novo instala por cima do anterior.
+    signingConfigs {
+        create("galeria") {
+            storeFile = file("galeria.keystore")
+            storePassword = "galeria123"
+            keyAlias = "galeria"
+            keyPassword = "galeria123"
+        }
+    }
+
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("galeria")
+        }
+        debug { signingConfig = signingConfigs.getByName("galeria") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

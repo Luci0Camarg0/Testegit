@@ -2,7 +2,11 @@ name: Gerar APK
 
 on:
   push:
+    branches: [apk-galeria]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,8 +20,60 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
-      - run: gradle assembleDebug
+      - run: gradle assembleRelease
+      - run: cp app/build/outputs/apk/release/app-release.apk GaleriaPlus.apk
+      - name: Publicar APK para download direto
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: galeria-v${{ github.run_number }}
+          name: Galeria+ (versão ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: GaleriaPlus.apk
       - uses: actions/upload-artifact@v4
         with:
           name: galeria-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: GaleriaPlus.apk
+
+  prints:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: galeria-apk
+      - name: Criar fotos e músicas de exemplo
+        run: |
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          mkdir -p amostras
+          for c in red blue green orange purple teal pink gold; do
+            ffmpeg -loglevel error -f lavfi -i "color=c=$c:s=800x800" -f lavfi -i "testsrc=s=400x400" \
+              -filter_complex "[0][1]overlay=200:200" -frames:v 1 "amostras/foto_$c.jpg"
+          done
+          i=0
+          for t in "Noite na Cidade" "Batida Forte" "Chuva de Verão" "Estrada"; do
+            i=$((i+1))
+            ffmpeg -loglevel error -f lavfi -i "sine=frequency=$((300+i*100)):duration=20" \
+              -metadata title="$t" -metadata artist="Artista $i" -metadata album="Álbum $i" "amostras/musica_$i.mp3"
+          done
+      - name: Habilitar KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          script: bash .github/prints.sh
+      - name: Salvar prints no branch "prints"
+        if: always()
+        run: |
+          cd prints
+          git init -q -b prints
+          git add -A
+          git -c user.name=github-actions -c user.email=actions@github.com commit -qm "Prints da versão ${{ github.run_number }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" prints
